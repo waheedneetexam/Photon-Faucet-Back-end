@@ -1,0 +1,24 @@
+[Unit]
+Description=PhotonBolt Regtest Faucet
+After=network.target
+
+[Service]
+Type=simple
+User=waheed
+Group=waheed
+WorkingDirectory=/home/waheed/PhotonBoltXYZ/faucet
+ExecStart=/usr/bin/node /home/waheed/PhotonBoltXYZ/faucet/server.js
+Restart=always
+RestartSec=5
+Environment=PORT=8788
+Environment=BITCOIN_RPC_HOST=127.0.0.1
+Environment=BITCOIN_RPC_PORT=18443
+Environment=BITCOIN_RPC_USER=user
+Environment=BITCOIN_RPC_PASSWORD=password
+Environment=BITCOIN_RPC_WALLET=photon_dev
+Environment=FAUCET_AMOUNT_BTC=0.5
+Environment=FAUCET_COOLDOWN_MINUTES=15
+Environment=FAUCET_AUTO_MINE_BLOCKS=1
+
+[Install]
+WantedBy=multi-user.target

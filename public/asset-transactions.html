@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Asset Transactions</title>
+  <meta name="description" content="PhotonBolt RGB asset transfer history." />
+  <link rel="stylesheet" href="/asset-registry.css?v=20260313d" />
+</head>
+<body>
+  <div class="registry-shell">
+    <header class="registry-header">
+      <div>
+        <p class="eyebrow">PhotonBolt Registry</p>
+        <h1 id="asset-title">Asset transactions</h1>
+        <p id="asset-subtitle" class="registry-status"></p>
+      </div>
+      <div class="search-wrap">
+        <a class="page-btn page-link-btn" href="/asset-registry.html">Back</a>
+      </div>
+    </header>
+
+    <main class="registry-card">
+      <div id="transactions-status" class="registry-status" aria-live="polite"></div>
+      <div class="table-wrap">
+        <table class="registry-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Status</th>
+              <th>Kind</th>
+              <th>Requested</th>
+              <th>Assignments</th>
+              <th>TXID</th>
+              <th>Recipient ID</th>
+              <th>Created At</th>
+              <th>Updated At</th>
+            </tr>
+          </thead>
+          <tbody id="transactions-body">
+            <tr class="loading-row">
+              <td colspan="9">Loading transfers...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <script src="/asset-transactions.js?v=20260313d" defer></script>
+</body>
+</html>

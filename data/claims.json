@@ -1,0 +1,10 @@
+{
+  "claims": [
+    {
+      "ip": "92.96.9.10",
+      "address": "bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95",
+      "timestamp": 1774510395224,
+      "txid": "a299235720edfcd6bc1199e24411bdebf66965c3ca05ed725f8e39a84be9e947"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Asset Registry</title>
+  <meta name="description" content="PhotonBolt RGB asset registry for regtest assets." />
+  <link rel="stylesheet" href="/asset-registry.css?v=20260313c" />
+</head>
+<body>
+  <div class="registry-shell">
+    <header class="registry-header">
+      <div>
+        <p class="eyebrow">PhotonBolt Registry</p>
+        <h1>Asset list</h1>
+      </div>
+      <div class="search-wrap">
+        <input id="registry-search" type="text" placeholder="Name/Contract ID" />
+      </div>
+    </header>
+
+    <main class="registry-card">
+      <div id="registry-status" class="registry-status" aria-live="polite"></div>
+      <div class="table-wrap">
+        <table class="registry-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Token Name</th>
+              <th>Total Supply</th>
+              <th>Precision</th>
+              <th>Address</th>
+              <th>Creation Date</th>
+              <th>Block Height</th>
+              <th>Contract ID</th>
+              <th>Transactions</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="registry-body">
+            <tr class="loading-row">
+              <td colspan="10">Loading registry...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination-bar">
+        <button id="prev-page-btn" class="page-btn" type="button">‹</button>
+        <div id="pagination-info" class="pagination-info">Page 1</div>
+        <button id="next-page-btn" class="page-btn" type="button">›</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="/asset-registry.js?v=20260313c" defer></script>
+</body>
+</html>

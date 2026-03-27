@@ -1,0 +1,48 @@
+---
+config:
+  layout: elk
+---
+graph TB
+    subgraph Client_Layer [Browser Extension / UI]
+        Chrome[Chrome Extension - User A]
+        Edge[Edge Extension - User B]
+    end
+
+    subgraph API_Layer [Gateway & Logic]
+        Nginx{Nginx / SSL}
+        Server[Node.js / Express Server]
+    end
+
+    subgraph Storage_Layer [Persistence]
+        Postgres[(PostgreSQL DB)]
+        Secrets[Wallet Secrets & Keys]
+        History[Transfer & Coloring Metadata]
+    end
+
+    subgraph RGB_L2_Layer [Layer 2: RGB & Lightning]
+        Proxy[RGB Proxy Server - Consignment Delivery]
+        MasterNode[Master RLN Node - Faucet/Issuer]
+        UserNode[User RLN Node - extension-jwx3b]
+        
+        MasterNode <--> |"Colored Lightning Channel (PHO)"| UserNode
+        UserNode --> |"Fetches Consignments"| Proxy
+        MasterNode --> |"Uploads Consignments"| Proxy
+    end
+
+    subgraph Bitcoin_L1_Layer [Layer 1: Bitcoin Base]
+        Electrs[Electrs Indexer]
+        Bitcoind[Bitcoin Core - Regtest]
+    end
+    Chrome & Edge --> Nginx
+    Nginx --> Server
+    Server --> Postgres
+    Server --> UserNode
+    
+    UserNode & MasterNode --> Electrs
+    Electrs --> Bitcoind
+    
+    Postgres -.-> Secrets
+    Postgres -.-> History
+
+    classDef highlight fill:#f9f,stroke:#333,stroke-width:2px;
+    class MasterNode,UserNode,Proxy highlight;

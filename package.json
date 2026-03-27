@@ -1,0 +1,11 @@
+{
+  "name": "photon-faucet",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PhotonBolt regtest faucet and RGB API",
+  "main": "server.js",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

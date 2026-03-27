@@ -1,0 +1,29 @@
+sequenceDiagram
+    autonumber
+    participant UI as Chrome Extension (User A)
+    participant API as Node.js Gateway
+    participant UN as User RLN Node (Sender)
+    participant MN as Master RLN Node (Receiver)
+    participant PX as RGB Proxy Server
+
+    Note over UN, MN: Lightning Channel Open (9 PHO / 1 PHO split)
+
+    UI->>API: POST /pay-lightning (invoice, wallet_key)
+    API->>UN: Command: send_payment(invoice)
+    
+    rect rgb[#fff3cd]
+    Note right of UN: Off-Chain Payment Logic
+    UN->>MN: HTLC / Payment Hash Update (Lightning)
+    MN-->>UN: Pre-image / Receipt (Instant)
+    end
+
+    rect rgb[#d1ecf1]
+    Note over UN, PX: RGB Metadata Sync
+    UN->>PX: Upload PHO Consignment (Proof of 1 PHO transfer)
+    MN->>PX: Download & Validate Consignment
+    end
+
+    UN->>API: Payment Success (Hash: 69018fc3...)
+    API->>UI: Update Balance: 8.00 PHO
+    
+    Note over UI: UI shows "Settled" in < 1 second

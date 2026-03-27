@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Regtest Faucet</title>
+  <meta name="description" content="PhotonBolt regtest faucet for local Bitcoin development." />
+  <link rel="stylesheet" href="/styles.css?v=20260313b" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="brand">PhotonBolt Faucet</p>
+        <p class="subbrand">Private regtest funding for PhotonBolt development flows</p>
+      </div>
+
+      <div class="status-rail">
+        <div class="rail-line rail-line-primary">
+          <span class="status-dot"></span>
+          <span id="networkValue">Connected</span>
+          <span class="rail-sep">|</span>
+          <span>Wallet Balance:</span>
+          <span id="walletBalanceValue">Loading...</span>
+          <span class="rail-sep">|</span>
+          <span>Chain Height:</span>
+          <span id="statusMode">Checking...</span>
+        </div>
+        <div class="rail-line">
+          <span>Cooldown:</span>
+          <span id="cooldownValue">Loading...</span>
+          <span class="rail-sep">|</span>
+          <span>Amount:</span>
+          <span id="amountValue">Loading...</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="console-card">
+      <section class="hero-copy">
+        <h1>PHOTONBOLT - FAUCET</h1>
+        <p class="lede">
+          Paste a valid <code>bcrt1...</code> address, request coins, and the server will send and confirm
+          the transaction immediately by mining a block.
+        </p>
+      </section>
+
+      <section class="request-panel">
+        <form id="claimForm" class="claim-form">
+          <label for="address">Bitcoin Address <span class="field-hint">(bcrt1...)</span></label>
+
+          <div class="address-row">
+            <textarea
+              id="address"
+              name="address"
+              rows="1"
+              placeholder="bcrt1_photon_..."
+              autocomplete="off"
+              spellcheck="false"
+              required
+            ></textarea>
+            <button type="button" class="ghost-button" id="pasteButton">Paste</button>
+          </div>
+
+          <div class="request-row">
+            <div class="amount-group" aria-label="Request amount">
+              <button type="button" class="amount-chip amount-chip-active" data-amount-btc="0.5" aria-pressed="true">0.5 BTC</button>
+              <button type="button" class="amount-chip" data-amount-btc="1" aria-pressed="false">1 BTC</button>
+              <button type="button" class="amount-chip" data-amount-btc="2" aria-pressed="false">2 BTC</button>
+            </div>
+
+            <div class="request-actions">
+              <button type="submit" id="claimButton" class="primary-button">Request Bitcoin</button>
+              <div class="command-hint">
+                <span class="hint-key">Ctrl and Enter</span>
+                <span>Press Ctrl+Enter to submit.</span>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <div id="messageBox" class="message hidden" aria-live="polite"></div>
+      </section>
+
+      <section class="detail-grid">
+        <article class="detail-block">
+          <h2>Workflow</h2>
+          <ul class="detail-list">
+            <li>Address validated by local node.</li>
+            <li>Faucet wallet sends amount.</li>
+            <li>Immediate block mining &amp; confirmation.</li>
+          </ul>
+        </article>
+
+        <article class="detail-block detail-block-divider">
+          <h2>Pro Tips &amp; Use Cases</h2>
+          <ul class="detail-list">
+            <li>Fast local demos, no public net delay.</li>
+            <li>Automated wallet QA &amp; test runs.</li>
+            <li>Integration &amp; CI/CD pipeline checks.</li>
+          </ul>
+        </article>
+      </section>
+
+      <section class="activity-panel">
+        <div class="activity-header">
+          <h2>Recent Activity</h2>
+          <span class="activity-note" id="statusSummary">Checking connectivity to the local node...</span>
+        </div>
+
+        <div class="activity-table-wrap">
+          <table class="activity-table">
+            <thead>
+              <tr>
+                <th>TXID</th>
+                <th>Address (bcrt1...)</th>
+                <th>Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="activityBody">
+              <tr class="empty-row">
+                <td colspan="4">No recent local requests yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js?v=20260313b" defer></script>
+</body>
+</html>
