@@ -1,0 +1,158 @@
+:root {
+  --bg: #071018;
+  --panel: rgba(19, 24, 33, 0.9);
+  --line: rgba(255, 166, 88, 0.2);
+  --line-soft: rgba(140, 160, 182, 0.14);
+  --text: #f0ede8;
+  --muted: #b9b0a5;
+  --accent: #eb832f;
+  --accent-soft: rgba(235, 131, 47, 0.15);
+  --green: #55e39e;
+  --shadow: 0 28px 60px rgba(0, 0, 0, 0.34);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: Georgia, "Times New Roman", serif;
+  background:
+    radial-gradient(circle at 80% 16%, rgba(235, 131, 47, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(7, 16, 24, 0.94), rgba(7, 16, 24, 1)),
+    linear-gradient(90deg, rgba(85, 227, 158, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(85, 227, 158, 0.03) 1px, transparent 1px);
+  background-size: auto, auto, 42px 42px, 42px 42px;
+}
+
+code,
+table {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.docs-shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 24px 40px;
+}
+
+.docs-header {
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #d7c7b1;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.88rem;
+}
+
+.docs-header h1 {
+  margin: 10px 0 0;
+  font-size: clamp(2.5rem, 4.8vw, 4.2rem);
+  line-height: 0.96;
+}
+
+.lede {
+  max-width: 70ch;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 1.06rem;
+  line-height: 1.58;
+}
+
+.docs-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.docs-card {
+  padding: 24px 26px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%),
+    linear-gradient(180deg, rgba(23, 30, 41, 0.94), rgba(18, 22, 31, 0.88));
+  box-shadow: var(--shadow);
+}
+
+.docs-card h2 {
+  margin: 0 0 14px;
+  font-size: 1.7rem;
+}
+
+.docs-card p,
+.docs-card li {
+  color: #ddd8cf;
+  font-size: 1rem;
+  line-height: 1.66;
+}
+
+.docs-card ul,
+.docs-card ol {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.docs-card p + p,
+.docs-card p + ul,
+.docs-card p + ol,
+.docs-card ul + p,
+.docs-card ol + p {
+  margin-top: 12px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  padding: 12px 14px;
+  text-align: left;
+  color: #d8dee7;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+tbody td {
+  padding: 14px;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #d7dde6;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+code {
+  padding: 0.12rem 0.34rem;
+  border-radius: 0.42rem;
+  color: #eff4f8;
+  background: var(--accent-soft);
+}
+
+@media (max-width: 720px) {
+  .docs-shell {
+    padding: 18px 14px 28px;
+  }
+
+  .docs-card {
+    padding: 18px 16px;
+  }
+
+  .docs-card h2 {
+    font-size: 1.35rem;
+  }
+}

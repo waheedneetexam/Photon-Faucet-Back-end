@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt RGB Faucet</title>
+  <meta name="description" content="PhotonBolt regtest RGB faucet for funding RGB invoices from supported faucet assets." />
+  <link rel="stylesheet" href="/rgb-faucet.css?v=20260328a" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">PhotonBolt Faucet</p>
+        <h1>RGB Faucet</h1>
+        <p class="subtitle">Paste an RGB invoice, verify the asset, and claim test liquidity from the Photon registry.</p>
+      </div>
+      <div class="status-rail">
+        <div class="status-line">
+          <span class="status-dot"></span>
+          <span id="networkValue">Connected</span>
+          <span class="rail-sep">|</span>
+          <span>Cooldown:</span>
+          <span id="cooldownValue">Loading...</span>
+        </div>
+        <div class="status-line">
+          <span>Max claim:</span>
+          <span id="maxAmountValue">Loading...</span>
+          <span class="rail-sep">|</span>
+          <span>Wallet:</span>
+          <span id="walletValue">Loading...</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="hero-card">
+      <div class="hero-copy">
+        <p class="hero-kicker">Supported invoice types</p>
+        <p>RGB invoices and RGB Lightning invoices are both accepted. The faucet sends only supported registry assets and enforces a per-invoice claim cap.</p>
+      </div>
+      <div class="hero-actions">
+        <a class="hero-link" href="/asset-registry.html">Asset List</a>
+        <a class="hero-link hero-link-secondary" href="/channel-dashboard.html">Channel Dashboard</a>
+      </div>
+    </section>
+
+    <main class="layout-grid">
+      <section class="claim-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Claim</p>
+            <h2>Fund an RGB invoice</h2>
+          </div>
+        </div>
+
+        <form id="claimForm" class="claim-form">
+          <label for="invoiceInput">RGB Invoice</label>
+          <textarea
+            id="invoiceInput"
+            name="invoice"
+            rows="4"
+            placeholder="Paste rgb invoice or lnbcrt RGB Lightning invoice"
+            spellcheck="false"
+            required
+          ></textarea>
+
+          <div class="form-actions">
+            <button type="button" class="ghost-button" id="pasteButton">Paste</button>
+            <button type="button" class="ghost-button" id="decodeButton">Decode</button>
+            <button type="submit" class="primary-button" id="claimButton">Claim From Faucet</button>
+          </div>
+        </form>
+
+        <div id="messageBox" class="message hidden" aria-live="polite"></div>
+
+        <div class="decode-panel">
+          <div class="decode-head">
+            <h3>Decoded invoice</h3>
+            <span id="decodeState" class="decode-state">Awaiting invoice</span>
+          </div>
+          <dl class="decode-grid">
+            <div>
+              <dt>Invoice type</dt>
+              <dd id="invoiceKindValue">-</dd>
+            </div>
+            <div>
+              <dt>Asset ID</dt>
+              <dd id="assetIdValue">-</dd>
+            </div>
+            <div>
+              <dt>Requested amount</dt>
+              <dd id="amountValue">-</dd>
+            </div>
+            <div>
+              <dt>Recipient</dt>
+              <dd id="recipientValue">-</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd id="decodedStatusValue">-</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="activity-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Recent claims</p>
+            <h2>Local activity</h2>
+          </div>
+        </div>
+        <div class="activity-wrap">
+          <table class="activity-table">
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>Amount</th>
+                <th>Reference</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody id="activityBody">
+              <tr class="empty-row">
+                <td colspan="4">No local RGB claims yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="registry-card">
+        <div class="section-header registry-header">
+          <div>
+            <p class="eyebrow">Registry</p>
+            <h2>Supported RGB assets</h2>
+          </div>
+          <div class="search-wrap">
+            <input id="registrySearch" type="text" placeholder="Search by name, ticker, contract ID" />
+          </div>
+        </div>
+        <div id="registryStatus" class="registry-status"></div>
+        <div class="table-wrap">
+          <table class="registry-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Token Name</th>
+                <th>Ticker</th>
+                <th>Precision</th>
+                <th>Contract ID</th>
+                <th>Supply</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="registryBody">
+              <tr class="loading-row">
+                <td colspan="7">Loading RGB faucet registry...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination-bar">
+          <button id="prevPageButton" class="page-btn" type="button">‹</button>
+          <div id="paginationInfo" class="pagination-info">Page 1</div>
+          <button id="nextPageButton" class="page-btn" type="button">›</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/rgb-faucet.js?v=20260328a" defer></script>
+</body>
+</html>

@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Channel Dashboard</title>
+  <meta name="description" content="PhotonBolt RGB Lightning channel liquidity and payment dashboard." />
+  <link rel="stylesheet" href="/asset-registry.css?v=20260328l" />
+  <link rel="stylesheet" href="/channel-dashboard.css?v=20260328l" />
+</head>
+<body>
+  <div class="registry-shell">
+    <header class="registry-header channel-header">
+      <div>
+        <p class="eyebrow">PhotonBolt Channels</p>
+        <h1>Payment channel dashboard</h1>
+        <p id="dashboard-subtitle" class="registry-status">
+          Inspect live RGB Lightning channel liquidity, capacity, and payment flow.
+        </p>
+      </div>
+      <div class="toolbar-actions">
+        <a class="page-btn page-link-btn" href="/">Faucet</a>
+        <a class="page-btn page-link-btn" href="/asset-registry.html">Asset List</a>
+        <div class="wallet-menu-shell">
+          <button id="wallet-menu-trigger" class="page-btn action-btn wallet-menu-trigger" type="button" aria-expanded="false" aria-controls="wallet-menu-panel">
+            Wallet
+          </button>
+          <div id="wallet-menu-panel" class="wallet-menu-panel hidden" role="menu">
+            <div class="wallet-menu-header">
+              <strong id="wallet-menu-title">Photon Wallet</strong>
+              <span id="wallet-menu-network" class="tiny-muted">Not connected</span>
+            </div>
+            <div class="wallet-menu-address-wrap">
+              <div class="wallet-menu-address-header">
+                <span class="tiny-muted">BTC Address</span>
+                <button id="wallet-address-copy" class="wallet-address-copy-btn" type="button" aria-label="Copy BTC address" title="Copy BTC address">⎘</button>
+              </div>
+              <code id="wallet-menu-address">---</code>
+            </div>
+            <div class="detail-pill wallet-balance-pill wallet-btc-balance-pill">
+              <span>BTC</span>
+              <strong id="wallet-btc-balance">--</strong>
+            </div>
+            <div class="wallet-balance-grid">
+              <div class="detail-pill wallet-balance-pill">
+                <span>PHO</span>
+                <strong id="wallet-pho-balance">--</strong>
+              </div>
+              <div class="detail-pill wallet-balance-pill">
+                <span>LIGHT</span>
+                <strong id="wallet-light-balance">--</strong>
+              </div>
+            </div>
+            <div id="wallet-menu-status" class="registry-status wallet-menu-status" aria-live="polite">
+              Connect Photon Wallet to view balances.
+            </div>
+            <div class="toolbar-actions wallet-menu-actions">
+              <button id="wallet-connect-button" class="page-btn action-btn wallet-action-btn" type="button">Connect</button>
+              <button id="wallet-disconnect-button" class="page-btn action-btn wallet-action-btn wallet-disconnect-btn wallet-hidden" type="button">Disconnect</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <section class="registry-card hero-card">
+      <div class="toolbar-row">
+        <label class="control-field">
+          <span>Channel</span>
+          <select id="channel-select"></select>
+        </label>
+        <label class="control-field control-search">
+          <span>Search</span>
+          <input id="channel-search" type="text" placeholder="Asset, channel ID, peer pubkey" />
+        </label>
+        <div class="toolbar-actions">
+          <button id="refresh-button" class="page-btn action-btn" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div id="dashboard-status" class="registry-status" aria-live="polite"></div>
+
+      <div class="metrics-grid">
+        <article class="metric-card">
+          <span class="metric-label">Channels</span>
+          <strong id="metric-channels">0</strong>
+          <small>Live channels discovered</small>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Selected Asset</span>
+          <strong id="metric-asset">-</strong>
+          <small>Current channel asset</small>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Max Sendable</span>
+          <strong id="metric-sendable">0</strong>
+          <small>Highest local asset balance on one side</small>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Activity</span>
+          <strong id="metric-payments">0</strong>
+          <small>Matched transfers on this channel</small>
+        </article>
+      </div>
+    </section>
+
+    <section class="registry-card asset-summary-card">
+      <div class="panel-header">
+        <div>
+          <h2>Asset sendability summary</h2>
+          <p class="registry-status form-note">
+            `Likely max instant payment` is an estimate based on the largest single ready channel on each side. Parallel channel liquidity may not be combined by the node.
+          </p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="registry-table compact-table">
+          <thead>
+            <tr>
+              <th>Asset</th>
+              <th>Ready</th>
+              <th>Opening</th>
+              <th>Issuer Local Total</th>
+              <th>User Local Total</th>
+              <th>Issuer Max Single</th>
+              <th>User Max Single</th>
+            </tr>
+          </thead>
+          <tbody id="asset-summary-body">
+            <tr class="loading-row">
+              <td colspan="7">Loading asset summary...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="registry-card open-channel-card">
+      <div class="panel-header">
+        <div>
+          <h2>Open parallel asset channel</h2>
+          <p class="registry-status form-note">
+            Existing channel top-up is not supported here. Use this to open a new channel for the same peer and asset, which adds effective liquidity.
+          </p>
+        </div>
+      </div>
+      <form id="open-channel-form" class="open-channel-form">
+        <label class="control-field">
+          <span>Node side</span>
+          <select id="open-account-ref" name="accountRef">
+            <option value="photon-rln-user">User Node</option>
+            <option value="photon-rln-issuer">Issuer Node</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Peer pubkey</span>
+          <input id="open-peer-pubkey" name="peerPubkey" type="text" placeholder="02..." required />
+        </label>
+        <label class="control-field">
+          <span>Asset ID</span>
+          <div class="field-with-action">
+            <input id="open-asset-id" name="assetId" type="text" placeholder="rgb:..." required />
+            <button id="asset-picker-button" class="page-btn action-btn inline-action-btn" type="button">Asset List</button>
+          </div>
+        </label>
+        <label class="control-field">
+          <span>BTC capacity (sats)</span>
+          <input id="open-capacity-sat" name="capacitySat" type="number" min="1" step="1" value="32000" required />
+        </label>
+        <label class="control-field">
+          <span>Asset amount</span>
+          <input id="open-asset-amount" name="assetAmount" type="number" min="1" step="1" value="100" required />
+        </label>
+        <label class="control-field">
+          <span>Push msat</span>
+          <input id="open-push-msat" name="pushMsat" type="number" min="0" step="1" value="0" />
+        </label>
+        <label class="control-field">
+          <span>Fee base msat</span>
+          <input id="open-fee-base-msat" name="feeBaseMsat" type="number" min="0" step="1" value="0" />
+        </label>
+        <label class="control-field">
+          <span>Fee proportional millionths</span>
+          <input id="open-fee-ppm" name="feeProportionalMillionths" type="number" min="0" step="1" value="0" />
+        </label>
+        <label class="toggle-field">
+          <input id="open-with-anchors" name="withAnchors" type="checkbox" checked />
+          <span>Use anchors</span>
+        </label>
+        <label class="toggle-field">
+          <input id="open-public" name="public" type="checkbox" />
+          <span>Public channel</span>
+        </label>
+        <div class="toolbar-actions">
+          <button id="prefill-selected-button" class="page-btn action-btn" type="button">Use Selected</button>
+          <button id="open-channel-button" class="page-btn action-btn action-btn-primary" type="submit">Open Channel</button>
+        </div>
+      </form>
+      <div id="open-channel-check" class="balance-check-panel">
+        <div class="balance-check-grid">
+          <div class="detail-pill">
+            <span>BTC Check</span>
+            <strong id="check-btc-status">Waiting</strong>
+            <small id="check-btc-detail" class="tiny-muted">Enter channel values to verify BTC capacity.</small>
+          </div>
+          <div class="detail-pill">
+            <span>Asset Check</span>
+            <strong id="check-asset-status">Waiting</strong>
+            <small id="check-asset-detail" class="tiny-muted">Enter channel values to verify asset balance.</small>
+          </div>
+          <div class="detail-pill">
+            <span>Open Result</span>
+            <strong id="check-open-status">Waiting</strong>
+            <small id="check-open-detail" class="tiny-muted">The form will block submit if the preflight check fails.</small>
+          </div>
+        </div>
+      </div>
+      <div id="open-channel-status" class="registry-status" aria-live="polite"></div>
+    </section>
+
+    <main class="registry-card">
+      <div class="panel-header">
+        <h2>Channel list</h2>
+        <span class="registry-status" id="channel-table-status"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="registry-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Asset</th>
+              <th>Channel ID</th>
+              <th>Peer</th>
+              <th>Asset Liquidity</th>
+              <th>BTC Capacity</th>
+              <th>HTLC Limit</th>
+              <th>Payments</th>
+              <th>Status</th>
+              <th>Inspect</th>
+              <th>Close</th>
+            </tr>
+          </thead>
+          <tbody id="channels-body">
+            <tr class="loading-row">
+              <td colspan="11">Loading channels...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+
+    <section class="details-grid">
+      <article class="registry-card detail-card">
+        <div class="panel-header">
+          <h2 id="detail-title">Channel details</h2>
+          <span id="detail-meta" class="registry-status"></span>
+        </div>
+        <div class="details-grid-inner">
+          <div class="detail-pill">
+            <span>Funding TX</span>
+            <code id="detail-funding">-</code>
+          </div>
+          <div class="detail-pill">
+            <span>Short Channel ID</span>
+            <code id="detail-short-id">-</code>
+          </div>
+          <div class="detail-pill">
+            <span>Asset Capacity</span>
+            <strong id="detail-asset-capacity">0</strong>
+          </div>
+          <div class="detail-pill">
+            <span>BTC Capacity</span>
+            <strong id="detail-btc-capacity">0 sats</strong>
+          </div>
+          <div class="detail-pill">
+            <span>Node Side</span>
+            <strong id="detail-owner">-</strong>
+          </div>
+        </div>
+
+        <div class="detail-close-bar">
+          <label class="toggle-field compact-toggle">
+            <input id="detail-close-force" type="checkbox" />
+            <span>Force close</span>
+          </label>
+          <button id="detail-close-button" class="page-btn action-btn close-btn" type="button">Close Selected Channel</button>
+          <span id="detail-close-status" class="registry-status"></span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="registry-table compact-table">
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>Wallets</th>
+                <th>Asset Local</th>
+                <th>Asset Remote</th>
+                <th>Outbound msat</th>
+                <th>Inbound msat</th>
+                <th>Next HTLC</th>
+                <th>Ready</th>
+              </tr>
+            </thead>
+            <tbody id="detail-nodes-body">
+              <tr class="empty-row">
+                <td colspan="8">Select a channel to inspect liquidity.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="registry-card detail-card">
+        <div class="panel-header">
+          <h2>Channel transfers</h2>
+          <span id="payments-meta" class="registry-status"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="registry-table compact-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Updated</th>
+                <th>Payment Hash</th>
+                <th>Asset Amount</th>
+                <th>BTC msat</th>
+                <th>Overall</th>
+                <th>Node States</th>
+              </tr>
+            </thead>
+            <tbody id="payments-body">
+              <tr class="empty-row">
+                <td colspan="7">Select a channel to inspect transfer history.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  </div>
+
+  <div id="asset-picker-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="asset-picker-title">
+    <div class="modal-card">
+      <div class="panel-header">
+        <div>
+          <h2 id="asset-picker-title">Select asset</h2>
+          <p id="asset-picker-status" class="registry-status">Loading registry...</p>
+        </div>
+        <button id="asset-picker-close" class="page-btn action-btn" type="button">Close</button>
+      </div>
+      <label class="control-field">
+        <span>Search assets</span>
+        <input id="asset-picker-search" type="text" placeholder="Name, ticker, contract ID" />
+      </label>
+      <div class="table-wrap modal-table-wrap">
+        <table class="registry-table compact-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Token</th>
+              <th>Ticker</th>
+              <th>Supply</th>
+              <th>Contract ID</th>
+              <th>Select</th>
+            </tr>
+          </thead>
+          <tbody id="asset-picker-body">
+            <tr class="loading-row">
+              <td colspan="6">Loading asset registry...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="/channel-dashboard.js?v=20260328f" defer></script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 const http = require('http');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
@@ -7,6 +8,29 @@ const {
   ensureWallet,
   upsertWalletAsset,
   upsertWalletAssetBalance,
+  setWalletFundingAddress,
+  setWalletMainBtcAddress,
+  getWalletAddresses,
+  upsertUtxoSlot,
+  getWalletUtxoSlots,
+  markSlotOccupied,
+  markSlotEmpty,
+  markSlotRedeemed,
+  createDepositRequest,
+  getWalletDepositRequests,
+  getActiveDepositRequestForWallet,
+  getActiveDepositRequests,
+  updateDepositDetected,
+  updateDepositConfirmations,
+  markDepositConfirmed,
+  markDepositFailed,
+  expireStaleDeposits,
+  ensureChannelApplicationsTable,
+  createChannelApplication,
+  getChannelApplicationById,
+  getChannelApplicationByInvoice,
+  markChannelApplicationRgbFunded,
+  markChannelApplicationActive,
 } = require('./db');
 
 const ROOT_DIR = __dirname;
@@ -74,6 +98,8 @@ const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
 const DEFAULT_FAUCET_AMOUNT_BTC = process.env.FAUCET_AMOUNT_BTC || '0.5';
 const ALLOWED_FAUCET_AMOUNTS_BTC = ['0.5', '1', '2'];
 const COOLDOWN_MINUTES = Number(process.env.FAUCET_COOLDOWN_MINUTES || 15);
+const RGB_FAUCET_MAX_AMOUNT = Number(process.env.RGB_FAUCET_MAX_AMOUNT || 1000);
+const RGB_FAUCET_COOLDOWN_PAUSED = true;
 const AUTO_MINE_BLOCKS = Number(process.env.FAUCET_AUTO_MINE_BLOCKS || 1);
 const MINING_ADDRESS_TYPE = process.env.FAUCET_MINING_ADDRESS_TYPE || 'bech32';
 
@@ -94,7 +120,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-let claimState = { claims: [] };
+let claimState = { claims: [], rgbClaims: [] };
 let writeQueue = Promise.resolve();
 let scanQueue = Promise.resolve();
 
@@ -146,6 +172,17 @@ function normalizeFaucetAmount(value) {
     return value.trim();
   }
   return '';
+}
+
+function detectRgbInvoiceKind(invoice) {
+  const normalized = String(invoice || '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.startsWith('ln')) {
+    return 'lightning';
+  }
+  return 'rgb';
 }
 
 function btcToSats(value) {
@@ -233,6 +270,21 @@ function resolveRgbNodeApiBaseForAccountRef(accountRef) {
   return RGB_NODE_API_BASE;
 }
 
+// Calls POST /address on the wallet's assigned node to get a fresh Bitcoin address.
+// Used as the generateFundingAddress callback passed to ensureWallet() on first wallet creation.
+async function generateFundingAddressForWallet(wallet) {
+  const accountRef = wallet.rgb_account_ref || getDefaultAccountRefForWallet(wallet);
+  const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+  const response = await rgbNodeRequestWithBase(apiBase, '/address', {}, 'POST');
+  return response?.address || null;
+}
+
+// Drop-in replacement for ensureWallet that always wires the funding address generator.
+// Use this everywhere in server.js instead of calling ensureWallet directly.
+function ensureWalletWithFunding(req, network = 'regtest') {
+  return ensureWallet(req, network, { generateFundingAddress: generateFundingAddressForWallet });
+}
+
 function resolveWalletNodeContext(wallet) {
   const accountRef = wallet.rgb_account_ref || getDefaultAccountRefForWallet(wallet);
   return {
@@ -288,6 +340,288 @@ async function fetchWalletLightningAssetBalance(wallet, assetId) {
 async function listNodePayments(apiBase) {
   const response = await rgbNodeRequestWithBase(apiBase, '/listpayments', {}, 'GET');
   return Array.isArray(response?.payments) ? response.payments : [];
+}
+
+async function listNodeChannels(apiBase) {
+  const response = await rgbNodeRequestWithBase(apiBase, '/listchannels', {}, 'GET');
+  return Array.isArray(response?.channels) ? response.channels : [];
+}
+
+function getChannelDashboardNodeSources() {
+  return [
+    {
+      label: 'Issuer Node',
+      accountRef: RGB_OWNER_ACCOUNT_REF,
+      apiBase: resolveRgbNodeApiBaseForAccountRef(RGB_OWNER_ACCOUNT_REF),
+    },
+    {
+      label: 'User Node',
+      accountRef: RGB_USER_ACCOUNT_REF,
+      apiBase: resolveRgbNodeApiBaseForAccountRef(RGB_USER_ACCOUNT_REF),
+    },
+  ];
+}
+
+function normalizeDashboardTimestamp(value) {
+  const seconds = Number(value || 0);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : null;
+}
+
+function deriveDashboardPaymentStatus(statuses) {
+  const values = new Set((statuses || []).map((status) => String(status || '').toLowerCase()));
+  if (values.has('succeeded')) return 'Succeeded';
+  if (values.has('pending')) return 'Pending';
+  if (values.has('failed')) return 'Failed';
+  return 'Unknown';
+}
+
+async function buildChannelDashboardSnapshot() {
+  const sources = getChannelDashboardNodeSources();
+  const [walletRows, sourceSnapshots] = await Promise.all([
+    query(
+      `
+        SELECT wallet_key, rgb_account_ref
+        FROM wallets
+        WHERE rgb_account_ref IS NOT NULL
+        ORDER BY wallet_key ASC
+      `
+    ),
+    Promise.all(
+      sources.map(async (source) => {
+        const [channels, payments] = await Promise.all([
+          listNodeChannels(source.apiBase),
+          listNodePayments(source.apiBase),
+        ]);
+
+        return { ...source, channels, payments };
+      })
+    ),
+  ]);
+
+  const walletKeysByAccountRef = new Map();
+  for (const row of walletRows.rows) {
+    const key = row.rgb_account_ref || 'unknown';
+    if (!walletKeysByAccountRef.has(key)) {
+      walletKeysByAccountRef.set(key, []);
+    }
+    walletKeysByAccountRef.get(key).push(row.wallet_key);
+  }
+
+  const assetIds = new Set();
+  for (const source of sourceSnapshots) {
+    for (const channel of source.channels) {
+      if (channel?.asset_id) assetIds.add(channel.asset_id);
+    }
+    for (const payment of source.payments) {
+      if (payment?.asset_id) assetIds.add(payment.asset_id);
+    }
+  }
+
+  const assetRows = assetIds.size > 0
+    ? await query(
+      `
+        SELECT DISTINCT ON (contract_id)
+          contract_id,
+          token_name,
+          ticker,
+          precision
+        FROM asset_registry
+        WHERE contract_id = ANY($1::text[])
+        ORDER BY contract_id, created_at DESC
+      `,
+      [[...assetIds]]
+    )
+    : { rows: [] };
+
+  const assetMetaById = new Map(
+    assetRows.rows.map((row) => [
+      row.contract_id,
+      {
+        tokenName: row.token_name || null,
+        ticker: row.ticker || null,
+        precision: row.precision ?? null,
+      },
+    ])
+  );
+
+  const channelsById = new Map();
+  for (const source of sourceSnapshots) {
+    for (const channel of source.channels) {
+      const channelId = channel?.channel_id;
+      if (!channelId) continue;
+
+      const assetMeta = assetMetaById.get(channel.asset_id) || null;
+      if (!channelsById.has(channelId)) {
+        channelsById.set(channelId, {
+          channelId,
+          shortChannelId: channel.short_channel_id || null,
+          fundingTxid: channel.funding_txid || null,
+          assetId: channel.asset_id || null,
+          assetName: assetMeta?.tokenName || null,
+          assetTicker: assetMeta?.ticker || null,
+          assetPrecision: assetMeta?.precision ?? null,
+          status: channel.status || 'Unknown',
+          ready: Boolean(channel.ready),
+          isUsable: Boolean(channel.is_usable),
+          public: Boolean(channel.public),
+          capacitySat: Number(channel.capacity_sat || 0),
+          nodes: [],
+          payments: [],
+          unmatchedPayments: [],
+        });
+      }
+
+      channelsById.get(channelId).nodes.push({
+        nodeLabel: source.label,
+        accountRef: source.accountRef,
+        apiBase: source.apiBase,
+        walletKeys: walletKeysByAccountRef.get(source.accountRef) || [],
+        peerPubkey: channel.peer_pubkey || null,
+        localBalanceSat: Number(channel.local_balance_sat || 0),
+        outboundBalanceMsat: Number(channel.outbound_balance_msat || 0),
+        inboundBalanceMsat: Number(channel.inbound_balance_msat || 0),
+        nextOutboundHtlcLimitMsat: Number(channel.next_outbound_htlc_limit_msat || 0),
+        nextOutboundHtlcMinimumMsat: Number(channel.next_outbound_htlc_minimum_msat || 0),
+        assetLocalAmount: Number(channel.asset_local_amount || 0),
+        assetRemoteAmount: Number(channel.asset_remote_amount || 0),
+        ready: Boolean(channel.ready),
+        isUsable: Boolean(channel.is_usable),
+        status: channel.status || 'Unknown',
+      });
+    }
+  }
+
+  for (const source of sourceSnapshots) {
+    const sourceChannels = source.channels;
+    for (const payment of source.payments) {
+      const paymentHash = payment?.payment_hash;
+      if (!paymentHash) continue;
+
+      let matchedChannels = sourceChannels.filter((channel) => {
+        if (!channel?.channel_id) return false;
+        if (channel.peer_pubkey !== payment.payee_pubkey) return false;
+        if (payment.asset_id) return channel.asset_id === payment.asset_id;
+        return true;
+      });
+
+      if (!payment.asset_id && matchedChannels.length > 1) {
+        matchedChannels = [];
+      }
+
+      if (matchedChannels.length === 0) {
+        continue;
+      }
+
+      const matchedChannel = channelsById.get(matchedChannels[0].channel_id);
+      if (!matchedChannel) continue;
+
+      let paymentEntry = matchedChannel.payments.find((entry) => entry.paymentHash === paymentHash);
+      if (!paymentEntry) {
+        paymentEntry = {
+          paymentHash,
+          assetId: payment.asset_id || matchedChannel.assetId || null,
+          assetName: matchedChannel.assetName,
+          assetTicker: matchedChannel.assetTicker,
+          assetAmount: payment.asset_amount ?? null,
+          amtMsat: payment.amt_msat ?? null,
+          createdAt: normalizeDashboardTimestamp(payment.created_at),
+          updatedAt: normalizeDashboardTimestamp(payment.updated_at),
+          overallStatus: payment.status || 'Unknown',
+          nodeStatuses: [],
+        };
+        matchedChannel.payments.push(paymentEntry);
+      }
+
+      paymentEntry.assetAmount = paymentEntry.assetAmount ?? payment.asset_amount ?? null;
+      paymentEntry.amtMsat = paymentEntry.amtMsat ?? payment.amt_msat ?? null;
+      paymentEntry.createdAt = paymentEntry.createdAt || normalizeDashboardTimestamp(payment.created_at);
+      paymentEntry.updatedAt = normalizeDashboardTimestamp(payment.updated_at) || paymentEntry.updatedAt;
+      paymentEntry.nodeStatuses.push({
+        nodeLabel: source.label,
+        accountRef: source.accountRef,
+        direction: payment.inbound ? 'Inbound' : 'Outbound',
+        status: payment.status || 'Unknown',
+        payeePubkey: payment.payee_pubkey || null,
+      });
+      paymentEntry.overallStatus = deriveDashboardPaymentStatus(
+        paymentEntry.nodeStatuses.map((status) => status.status)
+      );
+    }
+  }
+
+  const channels = [...channelsById.values()]
+    .map((channel) => {
+      const maxLocalAssetAmount = channel.nodes.reduce(
+        (max, node) => Math.max(max, Number(node.assetLocalAmount || 0)),
+        0
+      );
+      const maxRemoteAssetAmount = channel.nodes.reduce(
+        (max, node) => Math.max(max, Number(node.assetRemoteAmount || 0)),
+        0
+      );
+      const maxOutboundBalanceMsat = channel.nodes.reduce(
+        (max, node) => Math.max(max, Number(node.outboundBalanceMsat || 0)),
+        0
+      );
+      const maxInboundBalanceMsat = channel.nodes.reduce(
+        (max, node) => Math.max(max, Number(node.inboundBalanceMsat || 0)),
+        0
+      );
+      const nextOutboundHtlcLimitMsat = channel.nodes.reduce(
+        (max, node) => Math.max(max, Number(node.nextOutboundHtlcLimitMsat || 0)),
+        0
+      );
+
+      channel.payments.sort((left, right) => {
+        const a = Date.parse(right.updatedAt || right.createdAt || 0);
+        const b = Date.parse(left.updatedAt || left.createdAt || 0);
+        return a - b;
+      });
+
+      return {
+        ...channel,
+        totalAssetLiquidity: Math.max(
+          maxLocalAssetAmount + maxRemoteAssetAmount,
+          Number(channel.nodes[0]?.assetLocalAmount || 0) + Number(channel.nodes[0]?.assetRemoteAmount || 0)
+        ),
+        maxLocalAssetAmount,
+        maxRemoteAssetAmount,
+        maxOutboundBalanceMsat,
+        maxInboundBalanceMsat,
+        nextOutboundHtlcLimitMsat,
+        totalPaymentCount: channel.payments.length,
+        settledPaymentCount: channel.payments.filter((payment) => payment.overallStatus === 'Succeeded').length,
+        failedPaymentCount: channel.payments.filter((payment) => payment.overallStatus === 'Failed').length,
+        pendingPaymentCount: channel.payments.filter((payment) => payment.overallStatus === 'Pending').length,
+      };
+    })
+    .sort((left, right) => {
+      const leftUpdated = left.payments[0]?.updatedAt || '';
+      const rightUpdated = right.payments[0]?.updatedAt || '';
+      return rightUpdated.localeCompare(leftUpdated);
+    });
+
+  return {
+    ok: true,
+    refreshedAt: nowIso(),
+    nodeSources: sources.map((source) => ({
+      label: source.label,
+      accountRef: source.accountRef,
+      apiBase: source.apiBase,
+      walletKeys: walletKeysByAccountRef.get(source.accountRef) || [],
+    })),
+    channels,
+  };
+}
+
+async function handleRgbChannelDashboard(res) {
+  try {
+    const snapshot = await buildChannelDashboardSnapshot();
+    sendJson(res, 200, snapshot);
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Channel dashboard lookup failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
 }
 
 async function upsertLightningPaymentTransfer({
@@ -436,6 +770,63 @@ async function updateLightningTransferSettlementStatus(transferId, settlementSta
     `UPDATE rgb_transfers SET settlement_status = $1::settlement_status_enum WHERE id = $2`,
     [settlementStatus, transferId]
   );
+}
+
+function deriveLightningSettlementStatus(direction, paymentStatus) {
+  const status = paymentStatus ? String(paymentStatus) : null;
+  if (status === 'Succeeded') {
+    return 'SETTLED';
+  }
+  if (status === 'Failed') {
+    return direction === 'incoming' ? 'VALIDATION_FAILED' : 'DELIVERY_FAILED';
+  }
+  return null;
+}
+
+async function syncWalletLightningPayments(wallet, assetId = null, walletAssetId = null) {
+  const { apiBase } = resolveWalletNodeContext(wallet);
+  const payments = await listNodePayments(apiBase);
+  const filtered = payments.filter((payment) => {
+    if (!payment || typeof payment !== 'object') return false;
+    if (!payment.asset_id) return false;
+    return assetId ? payment.asset_id === assetId : true;
+  });
+
+  if (filtered.length === 0) {
+    return new Set();
+  }
+
+  const assetCache = new Map();
+  const touchedWalletAssetIds = new Set();
+
+  for (const payment of filtered) {
+    const paymentAssetId = String(payment.asset_id);
+    let resolvedWalletAssetId = walletAssetId && (!assetId || assetId === paymentAssetId) ? walletAssetId : null;
+
+    if (!resolvedWalletAssetId) {
+      if (!assetCache.has(paymentAssetId)) {
+        assetCache.set(
+          paymentAssetId,
+          syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId: paymentAssetId })
+            .then((synced) => synced.walletAsset.id)
+        );
+      }
+      resolvedWalletAssetId = await assetCache.get(paymentAssetId);
+    }
+
+    const direction = payment.inbound ? 'incoming' : 'outgoing';
+    await upsertLightningPaymentTransfer({
+      wallet,
+      walletAssetId: resolvedWalletAssetId,
+      payment,
+      direction,
+      invoice: null,
+      settlementStatus: deriveLightningSettlementStatus(direction, payment.status),
+    });
+    touchedWalletAssetIds.add(resolvedWalletAssetId);
+  }
+
+  return touchedWalletAssetIds;
 }
 
 // ---------------------------------------------------------------------------
@@ -602,12 +993,11 @@ async function orchestrateConsignmentUpload({ transferId, wallet, assetId, payme
     null;
 
   if (!recipientId) {
-    console.warn(`${tag} — no recipient_id available; cannot verify proxy consignment. Marking DELIVERY_FAILED.`);
-    await updateLightningTransferSettlementStatus(transferId, 'DELIVERY_FAILED');
+    console.warn(`${tag} — no recipient_id available from Lightning metadata; skipping proxy verification and waiting for payment sync.`);
     await recordTransferEvent({
       walletId: wallet.id,
       transferId,
-      eventType: 'rgb_consignment_failed',
+      eventType: 'rgb_consignment_pending',
       eventSource: 'settlement_orchestrator',
       payload: { reason: 'missing_recipient_id', assetId },
     });
@@ -833,12 +1223,14 @@ async function findWalletInvoiceByRecipient(walletId, recipientId, walletAssetId
   return result.rows[0] || null;
 }
 
-async function findRgbTransferByIdx(assetId, transferIdx) {
+async function findRgbTransferByIdx(assetId, transferIdx, apiBase = null) {
   if (!assetId || !Number.isFinite(Number(transferIdx))) {
     return null;
   }
 
-  const transferList = await rgbNodeRequest('/listtransfers', { asset_id: assetId });
+  const transferList = apiBase
+    ? await rgbNodeRequestWithBase(apiBase, '/listtransfers', { asset_id: assetId })
+    : await rgbNodeRequest('/listtransfers', { asset_id: assetId });
   const transfers = Array.isArray(transferList?.transfers) ? transferList.transfers : [];
   return transfers.find((entry) => Number(entry.idx) === Number(transferIdx)) || null;
 }
@@ -942,7 +1334,7 @@ async function registerWalletInvoiceSecret({
   blindingSecret,
   source,
 }) {
-  const wallet = await ensureWallet(req, network);
+  const wallet = await ensureWalletWithFunding(req, network);
   let walletAsset = null;
 
   if (assetId) {
@@ -1005,7 +1397,11 @@ async function reconcileWalletConsignmentSecrets(wallet, walletAssetId, transfer
       [wallet.id, transfer.recipient_id]
     );
 
-    const secret = existing.rows[0]?.blinding_secret || null;
+    const secret =
+      existing.rows[0]?.blinding_secret ||
+      (transfer.status === 'Settled' && transfer.recipient_id
+        ? `backend-managed:${transfer.recipient_id}`
+        : null);
     const secretStatus = secret ? 'active' : 'unavailable';
     const nextStatus =
       transfer.status === 'Settled'
@@ -1029,15 +1425,17 @@ async function reconcileWalletConsignmentSecrets(wallet, walletAssetId, transfer
             txid = COALESCE($3, txid),
             delivery_status = $4,
             validated_at = CASE WHEN $4 IN ('validated', 'acked') THEN COALESCE(validated_at, NOW()) ELSE validated_at END,
-            blinding_secret_status = $5,
-            metadata = $6
-          WHERE id = $7
+            blinding_secret = COALESCE(blinding_secret, $5),
+            blinding_secret_status = $6,
+            metadata = $7
+          WHERE id = $8
         `,
         [
           transfer._dbId || null,
           invoice?.id || null,
           transfer.txid || null,
           nextStatus,
+          secret,
           secretStatus,
           JSON.stringify(metadata),
           existing.rows[0].id,
@@ -1211,13 +1609,13 @@ async function deriveWalletScopedBalance(walletAssetId) {
 
     // Outgoing transfers in the active settlement pipeline (pre-final-handshake)
     // are counted as offchain_outbound and must NOT reduce the settled balance.
-    // DELIVERY_FAILED is included so the UI can surface the stuck amount.
+    // Do not include DELIVERY_FAILED here: failed deliveries are no longer
+    // actively "sending" and should not inflate the outbound badge.
     if (
       direction === 'outgoing' &&
       (settlementStatus === 'INITIATED' ||
         settlementStatus === 'PAYMENT_SUCCESS' ||
-        settlementStatus === 'CONSIGNMENT_UPLOADED' ||
-        settlementStatus === 'DELIVERY_FAILED')
+        settlementStatus === 'CONSIGNMENT_UPLOADED')
     ) {
       offchainOutbound += requestedAmount > 0n ? requestedAmount : settledAmount;
       continue;
@@ -1232,7 +1630,7 @@ async function deriveWalletScopedBalance(walletAssetId) {
     if (isTrulySettled) {
       if (direction === 'incoming') {
         settled += settledAmount;
-        if (transferKind === 'Issuance') {
+        if (transferKind === 'Issuance' || transferKind === 'LightningReceive') {
           spendable += settledAmount;
         } else {
           const txid = row.txid || null;
@@ -1262,9 +1660,14 @@ async function deriveWalletScopedBalance(walletAssetId) {
       continue;
     }
 
-    if (direction === 'incoming' && transferKind !== 'Issuance') {
+    if (
+      direction === 'incoming' &&
+      transferKind !== 'Issuance' &&
+      status !== 'WaitingCounterparty' &&
+      settlementStatus !== 'VALIDATION_FAILED'
+    ) {
       offchainInbound += requestedAmount;
-    } else if (direction === 'outgoing') {
+    } else if (direction === 'outgoing' && settlementStatus !== 'DELIVERY_FAILED') {
       offchainOutbound += requestedAmount;
     }
   }
@@ -1480,6 +1883,25 @@ async function syncWalletTransferRows(wallet, assetId, walletAssetId) {
       );
       transfer._dbId = inserted.rows[0].id;
     }
+
+    // ── UTXO slot state transitions ──────────────────────────────────────────
+    // params[2] = direction, params[4] = status, params[8] = receive_utxo
+    const slotDirection = params[2];
+    const slotStatus    = params[4];
+    const slotUtxo      = params[8];
+    if (slotStatus === 'Settled' && slotUtxo) {
+      try {
+        if (slotDirection === 'incoming') {
+          const updated = await markSlotOccupied(slotUtxo, transfer._dbId);
+          if (updated) console.log(`[${nowIso()}] [UTXO] slot OCCUPIED outpoint=${slotUtxo} transfer=${transfer._dbId}`);
+        } else if (slotDirection === 'outgoing') {
+          const updated = await markSlotEmpty(slotUtxo);
+          if (updated) console.log(`[${nowIso()}] [UTXO] slot EMPTY outpoint=${slotUtxo}`);
+        }
+      } catch (slotErr) {
+        console.warn(`[${nowIso()}] [UTXO] slot transition failed outpoint=${slotUtxo}:`, slotErr.message);
+      }
+    }
   }
 
   if (relevantTransferIdxs.length > 0) {
@@ -1585,9 +2007,10 @@ async function handleRgbBalance(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const transfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
+    await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
     const balance = derivedBalance;
@@ -1652,7 +2075,7 @@ async function handleRgbDecodeLightningInvoice(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const { apiBase } = resolveWalletNodeContext(wallet);
     const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice });
     sendJson(res, 200, {
@@ -1691,10 +2114,7 @@ async function handleRgbLightningInvoice(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
-    await setWalletRgbAccountRef(wallet.id, RGB_USER_ACCOUNT_REF);
-    wallet.rgb_account_ref = RGB_USER_ACCOUNT_REF;
-
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const { apiBase } = resolveWalletNodeContext(wallet);
     const invoiceResponse = await rgbNodeRequestWithBase(apiBase, '/lninvoice', {
       expiry_sec: expirySec,
@@ -1735,14 +2155,28 @@ async function handleRgbTransfers(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const runtimeTransfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
+    await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, runtimeTransfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
     const balance = derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     const transfers = await getStoredWalletTransfers(wallet.id, synced.walletAsset.id);
+    const matchedApplication = await getChannelApplicationByInvoice(invoice);
+    if (matchedApplication) {
+      await markChannelApplicationRgbFunded({
+        id: matchedApplication.id,
+        paymentHash: payment.payment_hash || paymentResult?.payment_hash || null,
+        paymentStatus: payment.status || paymentResult?.status || 'Pending',
+        metadata: {
+          rgbFundingInvoicePaidAt: new Date().toISOString(),
+        },
+      });
+      await maybeAutoOpenChannelApplication({ id: matchedApplication.id });
+    }
+
     sendJson(res, 200, {
       ok: true,
       walletKey: wallet.wallet_key,
@@ -1777,7 +2211,7 @@ async function handleRgbSend(req, res) {
     : 1;
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
     const decoded = await rgbNodeRequestWithBase(walletApiBase, '/decodergbinvoice', { invoice });
     const assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
@@ -1885,11 +2319,12 @@ async function handleRgbRefresh(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
     await rgbNodeRequestWithBase(walletApiBase, '/refreshtransfers', { skip_sync: false });
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const runtimeTransfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
+    await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, runtimeTransfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
     const balance = derivedBalance;
@@ -1908,6 +2343,84 @@ async function handleRgbRefresh(req, res) {
   }
 }
 
+async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_api' }) {
+  const wallet = await ensureWalletWithFunding(req, 'regtest');
+  const { accountRef, apiBase } = resolveWalletNodeContext(wallet);
+  const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice });
+  const assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
+
+  if (!assetId) {
+    throw new Error('Lightning invoice is missing an RGB asset id.');
+  }
+
+  const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
+
+  const transferId = await upsertLightningPaymentTransfer({
+    wallet,
+    walletAssetId: synced.walletAsset.id,
+    payment: { ...decoded, status: 'Pending' },
+    direction: 'outgoing',
+    invoice,
+    settlementStatus: 'INITIATED',
+  });
+
+  const paymentResult = await rgbNodeRequestWithBase(apiBase, '/sendpayment', { invoice });
+  const payments = await listNodePayments(apiBase);
+  const payment = payments.find((entry) => entry.payment_hash === paymentResult?.payment_hash) || {
+    ...decoded,
+    ...paymentResult,
+    status: paymentResult?.status || 'Pending',
+    inbound: false,
+  };
+
+  if (payment.status !== 'Succeeded') {
+    const failedSettlement = deriveLightningSettlementStatus('outgoing', payment.status) || 'DELIVERY_FAILED';
+    await updateLightningTransferSettlementStatus(transferId, failedSettlement, payment);
+    throw new Error(
+      `RGB Lightning payment failed: ${payment.status || paymentResult?.status || 'unknown'}${payment.payment_hash ? ` (${payment.payment_hash})` : ''}`
+    );
+  }
+
+  await updateLightningTransferSettlementStatus(transferId, 'PAYMENT_SUCCESS', payment);
+
+  await recordTransferEvent({
+    walletId: wallet.id,
+    transferId,
+    eventType: 'rgb_lightning_payment',
+    eventSource,
+    payload: {
+      assetId,
+      paymentHash: payment.payment_hash || null,
+      amtMsat: payment.amt_msat ?? null,
+      assetAmount: payment.asset_amount ?? null,
+    },
+  });
+
+  setImmediate(() => {
+    orchestrateConsignmentUpload({ transferId, wallet, assetId, payment, decoded, invoice }).catch((err) =>
+      console.error(`[${nowIso()}] [RGB Settlement] Consignment orchestration error:`, err.message)
+    );
+  });
+
+  await setWalletRgbAccountRef(wallet.id, accountRef);
+  wallet.rgb_account_ref = accountRef;
+
+  await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
+
+  const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
+  const balance = derivedBalance;
+  await upsertWalletAssetBalance(synced.walletAsset.id, balance);
+
+  return {
+    wallet,
+    assetId,
+    balance,
+    decoded,
+    payment,
+    paymentResult,
+  };
+}
+
 async function handleRgbPayLightning(req, res) {
   let body;
   try {
@@ -1924,66 +2437,11 @@ async function handleRgbPayLightning(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, 'regtest');
-    const { accountRef, apiBase } = resolveWalletNodeContext(wallet);
-    const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice });
-    const assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
-
-    if (!assetId) {
-      throw new Error('Lightning invoice is missing an RGB asset id.');
-    }
-
-    const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
-
-    // Stage 1: INITIATED — create transfer row before touching the node
-    const transferId = await upsertLightningPaymentTransfer({
-      wallet,
-      walletAssetId: synced.walletAsset.id,
-      payment: { ...decoded, status: 'Pending' },
-      direction: 'outgoing',
+    const { wallet, assetId, balance, payment, paymentResult, decoded } = await executeRgbLightningPayment({
+      req,
       invoice,
-      settlementStatus: 'INITIATED',
-    });
-
-    // Stage 2: execute Lightning payment at the node
-    const paymentResult = await rgbNodeRequestWithBase(apiBase, '/sendpayment', { invoice });
-    const payments = await listNodePayments(apiBase);
-    const payment = payments.find((entry) => entry.payment_hash === paymentResult?.payment_hash) || {
-      ...decoded,
-      ...paymentResult,
-      status: paymentResult?.status || 'Pending',
-      inbound: false,
-    };
-
-    // Stage 3: PAYMENT_SUCCESS — pre-image received; update row status and settlement_status
-    await updateLightningTransferSettlementStatus(transferId, 'PAYMENT_SUCCESS', payment);
-
-    await recordTransferEvent({
-      walletId: wallet.id,
-      transferId,
-      eventType: 'rgb_lightning_payment',
       eventSource: 'wallet_api',
-      payload: {
-        assetId,
-        paymentHash: payment.payment_hash || null,
-        amtMsat: payment.amt_msat ?? null,
-        assetAmount: payment.asset_amount ?? null,
-      },
     });
-
-    // Stage 4: trigger async consignment verification/ACK pipeline (non-blocking)
-    setImmediate(() => {
-      orchestrateConsignmentUpload({ transferId, wallet, assetId, payment, decoded, invoice }).catch((err) =>
-        console.error(`[${nowIso()}] [RGB Settlement] Consignment orchestration error:`, err.message)
-      );
-    });
-
-    await setWalletRgbAccountRef(wallet.id, accountRef);
-    wallet.rgb_account_ref = accountRef;
-
-    const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
-    const balance = derivedBalance;
-    await upsertWalletAssetBalance(synced.walletAsset.id, balance);
 
     sendJson(res, 200, {
       ok: true,
@@ -2015,7 +2473,7 @@ async function handleRgbPayLightning(req, res) {
  */
 async function handleRgbSettlementStatus(req, res, parsedUrl) {
   try {
-    const wallet = await ensureWallet(req, 'regtest');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
     const assetId = parsedUrl.searchParams.get('assetId') || null;
 
     const params = [wallet.id];
@@ -2074,6 +2532,370 @@ async function handleRgbSettlementStatus(req, res, parsedUrl) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [RGB API] Settlement status lookup failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UTXO Slot Management API
+// ─────────────────────────────────────────────────────────────────────────────
+
+const UTXO_SLOT_SATS = Number(process.env.UTXO_SLOT_SATS || 33000); // 0.00033 BTC
+
+/*
+ * GET /api/utxo/funding-address
+ *
+ * Returns the wallet's permanent node-generated UTXO funding address and the
+ * exact amount the user must send to create one UTXO slot. The extension shows
+ * this address + QR code when the user clicks "Create UTXO".
+ *
+ * If the wallet somehow has no funding address yet (e.g. created before this
+ * feature was deployed) we generate one on-demand and store it.
+ */
+async function handleGetFundingAddress(req, res) {
+  try {
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+
+    // Fallback: if still missing after ensureWallet, generate now
+    let fundingAddress = wallet.utxo_funding_address;
+    if (!fundingAddress) {
+      fundingAddress = await generateFundingAddressForWallet(wallet);
+      if (fundingAddress) {
+        await setWalletFundingAddress({ walletId: wallet.id, utxoFundingAddress: fundingAddress });
+      }
+    }
+
+    if (!fundingAddress) {
+      sendJson(res, 503, { ok: false, error: 'Could not generate a UTXO funding address. Node may be offline.' });
+      return;
+    }
+
+    // Ensure a pending deposit request exists so the watcher starts monitoring.
+    // Skip if one is already active (pending or confirming).
+    const existing = await getActiveDepositRequestForWallet(wallet.id);
+    if (!existing) {
+      const { accountRef } = resolveWalletNodeContext(wallet);
+      await createDepositRequest({
+        walletId: wallet.id,
+        depositAddress: fundingAddress,
+        expectedSats: UTXO_SLOT_SATS,
+        requiredConfirmations: DEPOSIT_REQUIRED_CONFIRMATIONS,
+        nodeAccountRef: accountRef,
+      });
+      console.log(`[${nowIso()}] [UTXO] Created pending deposit request for wallet=${wallet.wallet_key}`);
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      fundingAddress,
+      expectedSats: UTXO_SLOT_SATS,
+      expectedBtc: (UTXO_SLOT_SATS / 1e8).toFixed(8),
+      label: `PhotonBolt UTXO slot — send exactly ${(UTXO_SLOT_SATS / 1e8).toFixed(8)} BTC`,
+      walletKey: wallet.wallet_key,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [UTXO] funding-address failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+function formatChannelApplicationResponse(application) {
+  if (!application) {
+    return null;
+  }
+
+  const btcDepositStatus = application.btc_deposit_status || 'pending';
+  const btcFunded = btcDepositStatus === 'confirmed';
+  const rgbFunded = application.status === 'funded' || application.status === 'channel_active' || application.status === 'rgb_funded';
+  let status = application.status || 'pending_funding';
+
+  if (status === 'pending_funding' && btcFunded) {
+    status = 'btc_funded';
+  }
+
+  return {
+    id: application.id,
+    ownerWalletAddress: application.owner_wallet_address,
+    ownerWalletKey: application.owner_wallet_key || null,
+    accountRef: application.account_ref,
+    peerPubkey: application.peer_pubkey,
+    btcDepositAddress: application.btc_deposit_address,
+    btcAmountSats: Number(application.btc_amount_sats || 0),
+    btcDepositStatus,
+    btcDepositTxid: application.deposit_txid || null,
+    btcReceivedSats: Number(application.received_sats || 0),
+    btcConfirmations: Number(application.confirmations || 0),
+    btcFunded,
+    rgbInvoiceId: application.rgb_invoice_id || null,
+    rgbInvoice: application.rgb_invoice || null,
+    rgbAssetId: application.rgb_asset_id,
+    rgbAssetAmount: Number(application.rgb_asset_amount || 0),
+    rgbFunded,
+    status,
+    txCounter: Number(application.tx_counter || 0),
+    txThreshold: Number(application.tx_threshold || 100),
+    commissionRateSats: Number(application.commission_rate_sats || 0),
+    earnedFeesSats: Number(application.earned_fees_sats || 0),
+    channelId: application.channel_id || null,
+    createdAt: application.created_at,
+    updatedAt: application.updated_at,
+    fundingProgress: {
+      completed: (btcFunded ? 1 : 0) + (rgbFunded ? 1 : 0),
+      total: 2,
+    },
+    metadata: application.metadata || {},
+  };
+}
+
+async function handleChannelApplicationCreate(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const ownerWalletAddress = typeof body.ownerWalletAddress === 'string' ? body.ownerWalletAddress.trim() : '';
+  const accountRef = typeof body.accountRef === 'string' ? body.accountRef.trim() : '';
+  const peerPubkey = typeof body.peerPubkey === 'string' ? body.peerPubkey.trim() : '';
+  const rgbAssetId = typeof body.rgbAssetId === 'string' ? body.rgbAssetId.trim() : '';
+  const btcAmountSats = Math.trunc(Number(body.btcAmountSats || 0));
+  const rgbAssetAmount = Math.trunc(Number(body.rgbAssetAmount || 0));
+  const commissionRateSats = Math.max(0, Math.trunc(Number(body.commissionRateSats || 0)));
+  const txThreshold = Math.max(100, Math.trunc(Number(body.txThreshold || 100)));
+
+  if (!ownerWalletAddress) {
+    sendJson(res, 400, { ok: false, error: 'ownerWalletAddress is required.' });
+    return;
+  }
+  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
+    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+    return;
+  }
+  if (!/^[0-9a-fA-F]{66}$/.test(peerPubkey)) {
+    sendJson(res, 400, { ok: false, error: 'peerPubkey must be a 33-byte compressed hex pubkey.' });
+    return;
+  }
+  if (!rgbAssetId) {
+    sendJson(res, 400, { ok: false, error: 'rgbAssetId is required.' });
+    return;
+  }
+  if (!Number.isFinite(btcAmountSats) || btcAmountSats <= 0) {
+    sendJson(res, 400, { ok: false, error: 'btcAmountSats must be a positive integer.' });
+    return;
+  }
+  if (!Number.isFinite(rgbAssetAmount) || rgbAssetAmount <= 0) {
+    sendJson(res, 400, { ok: false, error: 'rgbAssetAmount must be a positive integer.' });
+    return;
+  }
+
+  try {
+    await ensureChannelApplicationsTable();
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+    const btcFunding = await rgbNodeRequestWithBase(apiBase, '/address', {}, 'POST');
+    const btcDepositAddress = typeof btcFunding?.address === 'string' ? btcFunding.address.trim() : '';
+    if (!btcDepositAddress) {
+      throw new Error('Unable to generate a BTC deposit address for the requested node.')
+    }
+
+    const invoiceResponse = await rgbNodeRequestWithBase(apiBase, '/lninvoice', {
+      expiry_sec: 3600,
+      amt_msat: 3000000,
+      asset_id: rgbAssetId,
+      asset_amount: rgbAssetAmount,
+    });
+    const rgbInvoice = typeof invoiceResponse?.invoice === 'string' ? invoiceResponse.invoice.trim() : null;
+
+    const depositRequest = await createDepositRequest({
+      walletId: wallet.id,
+      depositAddress: btcDepositAddress,
+      expectedSats: btcAmountSats,
+      requiredConfirmations: DEPOSIT_REQUIRED_CONFIRMATIONS,
+      nodeAccountRef: accountRef,
+    });
+
+    const application = await createChannelApplication({
+      id: randomUUID(),
+      walletId: wallet.id,
+      ownerWalletAddress,
+      ownerWalletKey: wallet.wallet_key,
+      accountRef,
+      peerPubkey,
+      btcDepositAddress,
+      rgbInvoiceId: invoiceResponse?.invoice_id || null,
+      rgbInvoice,
+      btcAmountSats,
+      rgbAssetId,
+      rgbAssetAmount,
+      txThreshold,
+      commissionRateSats,
+      depositRequestId: depositRequest.id,
+      metadata: {
+        network: 'regtest',
+        applicationSource: 'dev-dashboard',
+      },
+    });
+
+    const hydrated = await getChannelApplicationById(application.id);
+    sendJson(res, 200, {
+      ok: true,
+      application: formatChannelApplicationResponse(hydrated || application),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [PLM] create application failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleChannelApplicationStatus(_req, res, parsedUrl) {
+  const id = parsedUrl.searchParams.get('id') || '';
+  if (!id.trim()) {
+    sendJson(res, 400, { ok: false, error: 'id is required.' });
+    return;
+  }
+
+  try {
+    await ensureChannelApplicationsTable();
+    const application = await maybeAutoOpenChannelApplication({ id: id.trim() });
+    if (!application) {
+      sendJson(res, 404, { ok: false, error: 'Channel application not found.' });
+      return;
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      application: formatChannelApplicationResponse(application),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [PLM] application status failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+/**
+ * POST /api/utxo/redeem
+ *
+ * Redeems a FREE or EMPTY UTXO slot: sends the slot's BTC back to the wallet's
+ * main_btc_address via the rgb-lightning-node /sendbtc endpoint, then marks
+ * the slot REDEEMED.
+ *
+ * Body: { slotId: "<uuid>", mainBtcAddress?: "<address>" }
+ *   mainBtcAddress is optional if already stored in wallets.main_btc_address.
+ *   If supplied it is saved for future use.
+ */
+async function handleRedeemUtxoSlot(req, res) {
+  try {
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const body = await readRequestJson(req);
+
+    const { slotId, mainBtcAddress: bodyAddress } = body || {};
+    if (!slotId) {
+      sendJson(res, 400, { ok: false, error: 'slotId is required.' });
+      return;
+    }
+
+    // Resolve and optionally persist the user's main BTC address
+    let returnAddress = bodyAddress || wallet.main_btc_address;
+    if (bodyAddress && bodyAddress !== wallet.main_btc_address) {
+      await setWalletMainBtcAddress({ walletId: wallet.id, mainBtcAddress: bodyAddress });
+      returnAddress = bodyAddress;
+    }
+    if (!returnAddress) {
+      sendJson(res, 400, { ok: false, error: 'mainBtcAddress is required (first call must supply it).' });
+      return;
+    }
+
+    // Load slot and verify ownership + state
+    const slots = await getWalletUtxoSlots(wallet.id);
+    const slot = slots.find((s) => s.id === slotId);
+    if (!slot) {
+      sendJson(res, 404, { ok: false, error: 'Slot not found for this wallet.' });
+      return;
+    }
+    if (!['FREE', 'EMPTY'].includes(slot.state)) {
+      sendJson(res, 409, { ok: false, error: `Cannot redeem slot in state ${slot.state}. Only FREE or EMPTY slots can be redeemed.` });
+      return;
+    }
+
+    // Determine which node holds this wallet's funds
+    const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
+
+    // Amount to send: use stored sats_value, fall back to UTXO_SLOT_SATS minus a miner fee buffer
+    const REDEEM_FEE_BUFFER_SATS = 500;
+    const sendSats = slot.sats_value
+      ? Math.max(0, Number(slot.sats_value) - REDEEM_FEE_BUFFER_SATS)
+      : Math.max(0, UTXO_SLOT_SATS - REDEEM_FEE_BUFFER_SATS);
+
+    if (sendSats <= 546) {
+      sendJson(res, 400, { ok: false, error: 'Slot value too low to redeem (dust limit).' });
+      return;
+    }
+
+    // Call /sendbtc on the node
+    const sendResult = await rgbNodeRequestWithBase(walletApiBase, '/sendbtc', {
+      address: returnAddress,
+      amount: sendSats,
+      fee_rate: 1,
+      skip_sync: false,
+    });
+
+    const txid = sendResult?.txid || null;
+    if (!txid) {
+      console.error(`[${nowIso()}] [UTXO] /sendbtc returned no txid:`, JSON.stringify(sendResult));
+      sendJson(res, 502, { ok: false, error: 'Node did not return a txid. Redeem may have failed.' });
+      return;
+    }
+
+    // Mark slot as redeemed
+    await markSlotRedeemed(slotId, txid);
+
+    console.log(`[${nowIso()}] [UTXO] slot REDEEMED slotId=${slotId} txid=${txid} to=${returnAddress} sats=${sendSats}`);
+
+    sendJson(res, 200, {
+      ok: true,
+      txid,
+      slotId,
+      returnAddress,
+      sentSats: sendSats,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [UTXO] /redeem failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+/**
+ * GET /api/utxo/slots
+ *
+ * Returns all UTXO slots for the calling wallet with their current state
+ * (FREE / OCCUPIED / EMPTY / REDEEMED).
+ */
+async function handleGetUtxoSlots(req, res) {
+  try {
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const slots = await getWalletUtxoSlots(wallet.id);
+
+    sendJson(res, 200, {
+      ok: true,
+      walletKey: wallet.wallet_key,
+      slots: slots.map((s) => ({
+        id: s.id,
+        outpoint: s.outpoint,
+        state: s.state,
+        satsValue: s.sats_value ? Number(s.sats_value) : null,
+        nodeAccountRef: s.node_account_ref,
+        transferId: s.rgb_transfer_id,
+        invoiceId: s.invoice_id,
+        redeemedTxid: s.redeemed_txid,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+        redeemedAt: s.redeemed_at,
+      })),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [UTXO] /slots failed:`, error.message);
     sendJson(res, 502, { ok: false, error: error.message });
   }
 }
@@ -2153,9 +2975,10 @@ async function ensureState() {
   try {
     const raw = await fsp.readFile(CLAIMS_PATH, 'utf8');
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed.claims)) {
-      claimState = { claims: parsed.claims };
-    }
+    claimState = {
+      claims: Array.isArray(parsed.claims) ? parsed.claims : [],
+      rgbClaims: Array.isArray(parsed.rgbClaims) ? parsed.rgbClaims : [],
+    };
   } catch (error) {
     if (error.code !== 'ENOENT') {
       console.error(`[${nowIso()}] Failed to load claims store:`, error);
@@ -2168,6 +2991,7 @@ async function ensureState() {
 function pruneClaims() {
   const threshold = Date.now() - CLAIMS_TTL_MS;
   claimState.claims = claimState.claims.filter((entry) => entry.timestamp >= threshold);
+  claimState.rgbClaims = claimState.rgbClaims.filter((entry) => entry.timestamp >= threshold);
 }
 
 function persistState() {
@@ -2281,6 +3105,11 @@ function buildCooldownMessage(entry) {
 function getRecentClaim(ip, address) {
   pruneClaims();
   return claimState.claims.find((entry) => entry.ip === ip || entry.address === address);
+}
+
+function getRecentRgbClaim(ip, invoice) {
+  pruneClaims();
+  return claimState.rgbClaims.find((entry) => entry.ip === ip || entry.invoice === invoice);
 }
 
 async function scanAddress(address) {
@@ -2522,6 +3351,8 @@ async function handleStatus(req, res) {
       amountBtc: DEFAULT_FAUCET_AMOUNT_BTC,
       allowedAmountsBtc: ALLOWED_FAUCET_AMOUNTS_BTC,
       cooldownMinutes: COOLDOWN_MINUTES,
+      rgbFaucetMaxAmount: RGB_FAUCET_MAX_AMOUNT,
+      rgbFaucetCooldownPaused: RGB_FAUCET_COOLDOWN_PAUSED,
       autoMineBlocks: AUTO_MINE_BLOCKS,
       walletTxCount: walletInfo.txcount,
     });
@@ -2623,7 +3454,7 @@ async function handleRgbInvoice(req, res) {
   }
 
   try {
-    const wallet = await ensureWallet(req, getRequestNetwork(body));
+    const wallet = await ensureWalletWithFunding(req, getRequestNetwork(body));
     const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
     const payload = {
       min_confirmations: 1,
@@ -2634,6 +3465,7 @@ async function handleRgbInvoice(req, res) {
     };
 
     let invoice;
+    let invoiceUsedOpenAsset = false;
     try {
       invoice = await rgbNodeRequestWithBase(walletApiBase, '/rgbinvoice', payload);
     } catch (error) {
@@ -2642,6 +3474,14 @@ async function handleRgbInvoice(req, res) {
         console.warn(`[${nowIso()}] [RGB API] RGB issuer is out of uncolored UTXOs, replenishing and retrying once`);
         await ensureRgbUtxos(walletApiBase);
         invoice = await rgbNodeRequestWithBase(walletApiBase, '/rgbinvoice', payload);
+      } else if (message.includes('Unknown RGB contract ID') && assetId) {
+        // Node has never seen this asset — first-time bootstrap.
+        // Generate an open invoice (no asset_id). The consignment from the sender
+        // will carry the full contract data and teach this node about the asset.
+        console.warn(`[${nowIso()}] [RGB API] Node doesn't know contract for ${assetId}, falling back to open invoice for bootstrap`);
+        const openPayload = { ...payload, asset_id: null, assignment: null };
+        invoice = await rgbNodeRequestWithBase(walletApiBase, '/rgbinvoice', openPayload);
+        invoiceUsedOpenAsset = true;
       } else {
         throw error;
       }
@@ -2665,11 +3505,13 @@ async function handleRgbInvoice(req, res) {
     const storedInvoice = await findWalletInvoiceByRecipient(wallet.id, invoice?.recipient_id || null, walletAsset?.id || null);
     let managedSecret = null;
     let managedSecretSource = 'backend-invoice';
+    let receiveUtxo = invoice?.receive_utxo || null;
 
     if (getRequestNetwork(body) === 'regtest' && Number.isFinite(Number(invoice?.batch_transfer_idx))) {
       try {
-        const runtimeTransfer = await findRgbTransferByIdx(assetId, Number(invoice.batch_transfer_idx));
+        const runtimeTransfer = await findRgbTransferByIdx(assetId, Number(invoice.batch_transfer_idx), walletApiBase);
         if (runtimeTransfer?.receive_utxo) {
+          receiveUtxo = runtimeTransfer.receive_utxo;
           managedSecret = `backend-managed:${runtimeTransfer.receive_utxo}`;
           managedSecretSource = 'backend-runtime';
         } else if (invoice?.recipient_id) {
@@ -2677,7 +3519,12 @@ async function handleRgbInvoice(req, res) {
           managedSecretSource = 'backend-runtime';
         }
       } catch (runtimeError) {
+        // Node may not know the asset yet (bootstrap case). Fall back to recipient_id-based secret.
         console.warn(`[${nowIso()}] [RGB API] Unable to derive backend-managed secret token for invoice`, runtimeError?.message || runtimeError);
+        if (invoice?.recipient_id) {
+          managedSecret = `backend-managed:${invoice.recipient_id}`;
+          managedSecretSource = 'backend-runtime';
+        }
       }
     }
 
@@ -2693,6 +3540,28 @@ async function handleRgbInvoice(req, res) {
       network: getRequestNetwork(body),
       source: managedSecretSource,
     });
+
+    // Record the receive_utxo as a FREE slot — this is the UTXO locker the node
+    // has assigned for this invoice. It will transition to OCCUPIED when the
+    // incoming transfer settles (via syncWalletTransferRows or the watchdog).
+    if (receiveUtxo) {
+      try {
+        const { accountRef } = resolveWalletNodeContext(wallet);
+        await upsertUtxoSlot({
+          walletId: wallet.id,
+          outpoint: receiveUtxo,
+          state: 'FREE',
+          nodeAccountRef: accountRef,
+          invoiceId: storedInvoice?.id || null,
+          transferId: null,
+        });
+        console.log(`[${nowIso()}] [RGB API] UTXO slot recorded FREE outpoint=${receiveUtxo}`);
+      } catch (slotErr) {
+        // Non-fatal — invoice still valid, slot can be reconciled later
+        console.warn(`[${nowIso()}] [RGB API] Failed to record UTXO slot for invoice:`, slotErr.message);
+      }
+    }
+
     console.log(`[${nowIso()}] [RGB API] Invoice created successfully`, {
       walletKey: wallet.wallet_key,
       assetId,
@@ -2705,9 +3574,398 @@ async function handleRgbInvoice(req, res) {
       ok: true,
       ...invoice,
       invoice: rewrittenInvoice,
+      ...(invoiceUsedOpenAsset ? {
+        bootstrapInvoice: true,
+        bootstrapAssetId: assetId,
+        bootstrapNote: 'Your node has not received this asset before. This is an open invoice — ask the sender to send the correct asset to it. After your first receipt the node will know the contract and future invoices will work normally.',
+      } : {}),
     });
   } catch (error) {
     console.error(`[${nowIso()}] RGB invoice generation failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleRgbOpenChannel(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const accountRef =
+    typeof body.accountRef === 'string' && body.accountRef.trim() ? body.accountRef.trim() : RGB_USER_ACCOUNT_REF;
+  const peerPubkey =
+    typeof body.peerPubkey === 'string' && body.peerPubkey.trim() ? body.peerPubkey.trim() : '';
+  const assetId =
+    typeof body.assetId === 'string' && body.assetId.trim() ? body.assetId.trim() : '';
+  const capacitySat = Number(body.capacitySat);
+  const assetAmount = Number(body.assetAmount);
+  const pushMsat = body.pushMsat === undefined ? 0 : Number(body.pushMsat);
+  const temporaryChannelId =
+    typeof body.temporaryChannelId === 'string' && body.temporaryChannelId.trim()
+      ? body.temporaryChannelId.trim()
+      : null;
+  const publicFlag = Boolean(body.public);
+  const withAnchors = body.withAnchors === undefined ? true : Boolean(body.withAnchors);
+  const feeBaseMsat = body.feeBaseMsat === undefined ? 0 : Number(body.feeBaseMsat);
+  const feeProportionalMillionths =
+    body.feeProportionalMillionths === undefined ? 0 : Number(body.feeProportionalMillionths);
+
+  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
+    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+    return;
+  }
+
+  if (!/^[0-9a-f]{66}$/i.test(peerPubkey)) {
+    sendJson(res, 400, { ok: false, error: 'peerPubkey must be a 33-byte compressed hex pubkey.' });
+    return;
+  }
+
+  if (!assetId) {
+    sendJson(res, 400, { ok: false, error: 'assetId is required.' });
+    return;
+  }
+
+  if (!Number.isFinite(capacitySat) || capacitySat <= 0) {
+    sendJson(res, 400, { ok: false, error: 'capacitySat must be a positive number.' });
+    return;
+  }
+
+  if (!Number.isFinite(assetAmount) || assetAmount <= 0) {
+    sendJson(res, 400, { ok: false, error: 'assetAmount must be a positive number.' });
+    return;
+  }
+
+  if (!Number.isFinite(pushMsat) || pushMsat < 0) {
+    sendJson(res, 400, { ok: false, error: 'pushMsat must be zero or greater.' });
+    return;
+  }
+
+  if (!Number.isFinite(feeBaseMsat) || feeBaseMsat < 0) {
+    sendJson(res, 400, { ok: false, error: 'feeBaseMsat must be zero or greater.' });
+    return;
+  }
+
+  if (!Number.isFinite(feeProportionalMillionths) || feeProportionalMillionths < 0) {
+    sendJson(res, 400, { ok: false, error: 'feeProportionalMillionths must be zero or greater.' });
+    return;
+  }
+
+  try {
+    const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+    const payload = {
+      peer_pubkey_and_opt_addr: peerPubkey,
+      capacity_sat: Math.trunc(capacitySat),
+      push_msat: Math.trunc(pushMsat),
+      public: publicFlag,
+      with_anchors: withAnchors,
+      fee_base_msat: Math.trunc(feeBaseMsat),
+      fee_proportional_millionths: Math.trunc(feeProportionalMillionths),
+      temporary_channel_id: temporaryChannelId,
+      asset_id: assetId,
+      asset_amount: Math.trunc(assetAmount),
+    };
+
+    const result = await rgbNodeRequestWithBase(apiBase, '/openchannel', payload);
+
+    sendJson(res, 200, {
+      ok: true,
+      accountRef,
+      apiBase,
+      request: payload,
+      result,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Open channel failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function openRgbChannelInternal({
+  accountRef,
+  peerPubkey,
+  assetId,
+  capacitySat,
+  assetAmount,
+  pushMsat = 0,
+  public: publicFlag = false,
+  withAnchors = true,
+  feeBaseMsat = 0,
+  feeProportionalMillionths = 0,
+  temporaryChannelId = null,
+}) {
+  const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+  const payload = {
+    peer_pubkey_and_opt_addr: peerPubkey,
+    capacity_sat: Math.trunc(capacitySat),
+    push_msat: Math.trunc(pushMsat),
+    public: Boolean(publicFlag),
+    with_anchors: Boolean(withAnchors),
+    fee_base_msat: Math.trunc(feeBaseMsat),
+    fee_proportional_millionths: Math.trunc(feeProportionalMillionths),
+    temporary_channel_id: temporaryChannelId,
+    asset_id: assetId,
+    asset_amount: Math.trunc(assetAmount),
+  };
+
+  const result = await rgbNodeRequestWithBase(apiBase, '/openchannel', payload);
+  return { apiBase, payload, result };
+}
+
+async function reconcileChannelApplicationRgbFunding(applicationLike) {
+  if (!applicationLike?.id) {
+    return null;
+  }
+
+  const application = await getChannelApplicationById(applicationLike.id);
+  if (!application) {
+    return null;
+  }
+
+  if (!application.rgb_invoice) {
+    return application;
+  }
+
+  if (['rgb_funded', 'funded', 'channel_active'].includes(String(application.status || ''))) {
+    return application;
+  }
+
+  try {
+    const apiBase = resolveRgbNodeApiBaseForAccountRef(application.account_ref);
+    const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', {
+      invoice: application.rgb_invoice,
+    });
+    const paymentHash = typeof decoded?.payment_hash === 'string' ? decoded.payment_hash : '';
+    if (!paymentHash) {
+      return application;
+    }
+
+    const payments = await listNodePayments(apiBase);
+    const matched = payments.find((entry) => entry?.payment_hash === paymentHash);
+    const status = String(matched?.status || '').toLowerCase();
+
+    if (status === 'succeeded') {
+      await markChannelApplicationRgbFunded({
+        id: application.id,
+        paymentHash,
+        paymentStatus: matched?.status || 'Succeeded',
+        metadata: {
+          rgbFundingReconciledAt: new Date().toISOString(),
+        },
+      });
+      return await getChannelApplicationById(application.id);
+    }
+  } catch (error) {
+    console.warn(`[${nowIso()}] [PLM] RGB funding reconcile skipped for ${application.id}:`, error.message);
+  }
+
+  return application;
+}
+
+async function maybeAutoOpenChannelApplication(applicationLike) {
+  if (!applicationLike?.id) {
+    return null;
+  }
+
+  let application = await getChannelApplicationById(applicationLike.id);
+  if (!application) {
+    return null;
+  }
+
+  application = await reconcileChannelApplicationRgbFunding(application);
+  if (!application) {
+    return null;
+  }
+
+  if (application.channel_id || application.status === 'channel_active') {
+    return application;
+  }
+
+  const btcConfirmed = (application.btc_deposit_status || '') === 'confirmed';
+  const rgbFunded = ['rgb_funded', 'funded', 'channel_active'].includes(String(application.status || ''));
+
+  if (!btcConfirmed || !rgbFunded) {
+    return application;
+  }
+
+  try {
+    const opened = await openRgbChannelInternal({
+      accountRef: application.account_ref,
+      peerPubkey: application.peer_pubkey,
+      assetId: application.rgb_asset_id,
+      capacitySat: Number(application.btc_amount_sats || 0),
+      assetAmount: Number(application.rgb_asset_amount || 0),
+    });
+
+    const rawChannelId =
+      opened?.result?.channel_id ||
+      opened?.result?.channelId ||
+      opened?.result?.temporary_channel_id ||
+      opened?.result?.temporaryChannelId ||
+      null;
+
+    await markChannelApplicationActive({
+      id: application.id,
+      channelId: rawChannelId,
+      metadata: {
+        autoOpenResult: opened.result || null,
+        autoOpenRequest: opened.payload || null,
+      },
+    });
+
+    return await getChannelApplicationById(application.id);
+  } catch (error) {
+    console.error(`[${nowIso()}] [PLM] auto-open failed for application ${application.id}:`, error.message);
+    await query(
+      `UPDATE channel_applications
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [
+        application.id,
+        JSON.stringify({
+          autoOpenError: error.message,
+          autoOpenFailedAt: new Date().toISOString(),
+        }),
+      ]
+    );
+    return await getChannelApplicationById(application.id);
+  }
+}
+
+async function handleRgbOpenChannelCheck(req, res, parsedUrl) {
+  const accountRef =
+    typeof parsedUrl.searchParams.get('accountRef') === 'string' && parsedUrl.searchParams.get('accountRef').trim()
+      ? parsedUrl.searchParams.get('accountRef').trim()
+      : RGB_USER_ACCOUNT_REF;
+  const assetId =
+    typeof parsedUrl.searchParams.get('assetId') === 'string' && parsedUrl.searchParams.get('assetId').trim()
+      ? parsedUrl.searchParams.get('assetId').trim()
+      : '';
+  const capacitySat = Number(parsedUrl.searchParams.get('capacitySat') || 0);
+  const assetAmount = Number(parsedUrl.searchParams.get('assetAmount') || 0);
+  const feeReserveSat = 2500;
+
+  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
+    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+    return;
+  }
+
+  if (!assetId) {
+    sendJson(res, 400, { ok: false, error: 'assetId is required.' });
+    return;
+  }
+
+  if (!Number.isFinite(capacitySat) || capacitySat <= 0) {
+    sendJson(res, 400, { ok: false, error: 'capacitySat must be a positive number.' });
+    return;
+  }
+
+  if (!Number.isFinite(assetAmount) || assetAmount <= 0) {
+    sendJson(res, 400, { ok: false, error: 'assetAmount must be a positive number.' });
+    return;
+  }
+
+  try {
+    const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+    const [btcBalance, assetBalance] = await Promise.all([
+      rgbNodeRequestWithBase(apiBase, '/btcbalance', { skip_sync: false }),
+      rgbNodeRequestWithBase(apiBase, '/assetbalance', { asset_id: assetId }),
+    ]);
+
+    const vanillaSpendableSat = Number(btcBalance?.vanilla?.spendable || 0);
+    const assetSpendable = Number(assetBalance?.spendable || 0);
+    const requiredBtcSat = Math.trunc(capacitySat) + feeReserveSat;
+    const missingBtcSat = Math.max(0, requiredBtcSat - vanillaSpendableSat);
+    const missingAssetAmount = Math.max(0, Math.trunc(assetAmount) - assetSpendable);
+
+    sendJson(res, 200, {
+      ok: true,
+      accountRef,
+      apiBase,
+      feeReserveSat,
+      required: {
+        capacitySat: Math.trunc(capacitySat),
+        assetAmount: Math.trunc(assetAmount),
+        btcWithReserveSat: requiredBtcSat,
+      },
+      available: {
+        vanillaSpendableSat,
+        assetSpendable,
+      },
+      checks: {
+        btcSufficient: missingBtcSat === 0,
+        assetSufficient: missingAssetAmount === 0,
+        canOpenChannel: missingBtcSat === 0 && missingAssetAmount === 0,
+      },
+      missing: {
+        btcSat: missingBtcSat,
+        assetAmount: missingAssetAmount,
+      },
+      note: 'BTC check includes a small 2500 sat fee reserve estimate. Actual channel-open fees can vary.',
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Open channel check failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleRgbCloseChannel(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const accountRef =
+    typeof body.accountRef === 'string' && body.accountRef.trim() ? body.accountRef.trim() : '';
+  const channelId =
+    typeof body.channelId === 'string' && body.channelId.trim() ? body.channelId.trim() : '';
+  const peerPubkey =
+    typeof body.peerPubkey === 'string' && body.peerPubkey.trim() ? body.peerPubkey.trim() : '';
+  const force = Boolean(body.force);
+
+  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
+    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+    return;
+  }
+
+  if (!/^[0-9a-f]{64}$/i.test(channelId)) {
+    sendJson(res, 400, { ok: false, error: 'channelId must be a 32-byte hex channel id.' });
+    return;
+  }
+
+  if (!/^[0-9a-f]{66}$/i.test(peerPubkey)) {
+    sendJson(res, 400, { ok: false, error: 'peerPubkey must be a 33-byte compressed hex pubkey.' });
+    return;
+  }
+
+  try {
+    const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+    const result = await rgbNodeRequestWithBase(apiBase, '/closechannel', {
+      channel_id: channelId,
+      peer_pubkey: peerPubkey,
+      force,
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      accountRef,
+      apiBase,
+      request: {
+        channel_id: channelId,
+        peer_pubkey: peerPubkey,
+        force,
+      },
+      result,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Close channel failed:`, error.message);
     sendJson(res, 502, { ok: false, error: error.message });
   }
 }
@@ -2847,6 +4105,173 @@ async function handleClaim(req, res) {
   }
 }
 
+async function handleRgbFaucetClaim(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const invoice = typeof body.invoice === 'string' && body.invoice.trim() ? body.invoice.trim() : null;
+  const ip = getRemoteIp(req);
+
+  if (!invoice) {
+    sendJson(res, 400, { ok: false, error: 'An RGB invoice is required.' });
+    return;
+  }
+
+  const recent = RGB_FAUCET_COOLDOWN_PAUSED ? null : getRecentRgbClaim(ip, invoice);
+  if (recent) {
+    sendJson(res, 429, { ok: false, ...buildCooldownMessage(recent) });
+    return;
+  }
+
+  try {
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const { apiBase } = resolveWalletNodeContext(wallet);
+    const invoiceKind = detectRgbInvoiceKind(invoice);
+
+    if (!invoiceKind) {
+      throw new Error('Invoice format is not supported.');
+    }
+
+    let decoded;
+    let assetId = null;
+    let assetAmount = 0;
+    let transferTxid = null;
+    let paymentHash = null;
+    let minedBlocks = [];
+
+    if (invoiceKind === 'lightning') {
+      decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice });
+      assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
+      assetAmount = Number(decoded?.asset_amount || 0);
+
+      if (!assetId || !Number.isFinite(assetAmount) || assetAmount <= 0) {
+        throw new Error('Decoded RGB Lightning invoice is missing asset details.');
+      }
+
+      if (assetAmount > RGB_FAUCET_MAX_AMOUNT) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `RGB faucet limit exceeded. Maximum claim is ${RGB_FAUCET_MAX_AMOUNT} units per invoice.`,
+          maxAmount: RGB_FAUCET_MAX_AMOUNT,
+        });
+        return;
+      }
+    } else {
+      decoded = await rgbNodeRequestWithBase(apiBase, '/decodergbinvoice', { invoice });
+      assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
+      assetAmount = Number(decoded?.assignment?.value || 0);
+      const recipientId = typeof decoded?.recipient_id === 'string' ? decoded.recipient_id : null;
+      const endpoint = Array.isArray(decoded?.transport_endpoints) ? decoded.transport_endpoints[0] : null;
+
+      if (!assetId || !recipientId || !Number.isFinite(assetAmount) || assetAmount <= 0 || !endpoint) {
+        throw new Error('Decoded RGB invoice is missing required fields.');
+      }
+
+      if (assetAmount > RGB_FAUCET_MAX_AMOUNT) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `RGB faucet limit exceeded. Maximum claim is ${RGB_FAUCET_MAX_AMOUNT} units per invoice.`,
+          maxAmount: RGB_FAUCET_MAX_AMOUNT,
+        });
+        return;
+      }
+    }
+
+    const registryResult = await query(
+      `
+        SELECT token_name, ticker, precision, contract_id
+        FROM asset_registry
+        WHERE contract_id = $1
+        LIMIT 1
+      `,
+      [assetId]
+    );
+    const asset = registryResult.rows[0] || null;
+
+    if (!asset) {
+      sendJson(res, 400, {
+        ok: false,
+        error: 'This RGB asset is not available in the Photon faucet registry.',
+        maxAmount: RGB_FAUCET_MAX_AMOUNT,
+      });
+      return;
+    }
+
+    if (invoiceKind === 'lightning') {
+      const lightningResult = await executeRgbLightningPayment({
+        req,
+        invoice,
+        eventSource: 'faucet_api',
+      });
+      decoded = lightningResult.decoded;
+      paymentHash = lightningResult.payment?.payment_hash || lightningResult.paymentResult?.payment_hash || decoded?.payment_hash || null;
+    } else {
+      const recipientId = typeof decoded?.recipient_id === 'string' ? decoded.recipient_id : null;
+      const endpoint = Array.isArray(decoded?.transport_endpoints) ? decoded.transport_endpoints[0] : null;
+
+      const sendResult = await rgbNodeRequestWithBase(apiBase, '/sendrgb', {
+        donation: false,
+        fee_rate: 5,
+        min_confirmations: 1,
+        recipient_map: {
+          [assetId]: [
+            {
+              recipient_id: recipientId,
+              assignment: {
+                type: 'Fungible',
+                value: assetAmount,
+              },
+              transport_endpoints: [endpoint],
+            },
+          ],
+        },
+        skip_sync: false,
+      });
+      transferTxid = sendResult?.txid || null;
+
+      if (AUTO_MINE_BLOCKS > 0 && transferTxid) {
+        const miningAddress = await rpcRequest('getnewaddress', ['rgb-faucet-mining', MINING_ADDRESS_TYPE], true);
+        minedBlocks = await rpcRequest('generatetoaddress', [AUTO_MINE_BLOCKS, miningAddress]);
+      }
+    }
+
+    claimState.rgbClaims.push({
+      ip,
+      invoice,
+      invoiceKind,
+      assetId,
+      assetAmount,
+      timestamp: Date.now(),
+      txid: transferTxid,
+      paymentHash,
+    });
+    await persistState();
+
+    sendJson(res, 200, {
+      ok: true,
+      invoiceKind,
+      network: 'regtest',
+      cooldownMinutes: RGB_FAUCET_COOLDOWN_PAUSED ? 0 : COOLDOWN_MINUTES,
+      cooldownPaused: RGB_FAUCET_COOLDOWN_PAUSED,
+      maxAmount: RGB_FAUCET_MAX_AMOUNT,
+      asset: asset || { contract_id: assetId },
+      amount: assetAmount,
+      txid: transferTxid,
+      paymentHash,
+      minedBlocks,
+      decoded,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] RGB faucet claim failed for ${ip}:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message, maxAmount: RGB_FAUCET_MAX_AMOUNT });
+  }
+}
+
 async function serveStatic(req, res) {
   const parsedPath = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   const normalizedPath = parsedPath === '/' ? '/index.html' : parsedPath;
@@ -2928,6 +4353,31 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/channel/apply') {
+    await handleChannelApplicationCreate(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/channel/application') {
+    await handleChannelApplicationStatus(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/rgb/open-channel') {
+    await handleRgbOpenChannel(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/rgb/open-channel-check') {
+    await handleRgbOpenChannelCheck(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/rgb/close-channel') {
+    await handleRgbCloseChannel(req, res);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/rgb/invoice/register') {
     await handleRgbInvoiceRegister(req, res);
     return;
@@ -2958,6 +4408,11 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/rgb/faucet/claim') {
+    await handleRgbFaucetClaim(req, res);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/rgb/pay-lightning') {
     await handleRgbPayLightning(req, res);
     return;
@@ -2983,6 +4438,11 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/rgb/channel-dashboard') {
+    await handleRgbChannelDashboard(res);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/claim') {
     await handleClaim(req, res);
     return;
@@ -3000,6 +4460,27 @@ async function requestHandler(req, res) {
 
   if (req.method === 'POST' && pathname === '/api/regtest/mine') {
     await handleMineBlocks(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/utxo/funding-address') {
+    await handleGetFundingAddress(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/utxo/slots') {
+    await handleGetUtxoSlots(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/utxo/redeem') {
+    await handleRedeemUtxoSlot(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/utxo/deposit-watcher/trigger') {
+    runDepositWatcherCycle();
+    sendJson(res, 200, { ok: true, message: 'Deposit watcher cycle triggered.' });
     return;
   }
 
@@ -3275,6 +4756,17 @@ async function watchdogDriveReceiverSettlement() {
           });
           console.log(`${rtag} — SETTLED (amount=${settledAmount} txid=${matched.txid || 'n/a'})`);
 
+          // Belt-and-suspenders: ensure the UTXO slot is marked OCCUPIED
+          const watchdogReceiveUtxo = matched.receive_utxo || null;
+          if (watchdogReceiveUtxo) {
+            try {
+              const updated = await markSlotOccupied(watchdogReceiveUtxo, row.transfer_id);
+              if (updated) console.log(`[${nowIso()}] [UTXO] watchdog slot OCCUPIED outpoint=${watchdogReceiveUtxo}`);
+            } catch (slotErr) {
+              console.warn(`[${nowIso()}] [UTXO] watchdog slot transition failed outpoint=${watchdogReceiveUtxo}:`, slotErr.message);
+            }
+          }
+
         } else if (newSettlementStatus === 'VALIDATION_FAILED') {
           await query(
             `
@@ -3345,6 +4837,171 @@ function startReceiverWatchdog() {
   setImmediate(runReceiverWatchdogCycle);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UTXO Deposit Watcher
+//
+// Polls bitcoind for incoming transactions on all active UTXO funding addresses.
+// On sufficient confirmations calls /createutxos on the wallet's node, records
+// the new slot as FREE, and marks the deposit request as confirmed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DEPOSIT_WATCHER_INTERVAL_MS = Number(process.env.DEPOSIT_WATCHER_INTERVAL_MS || 15000);
+const DEPOSIT_REQUIRED_CONFIRMATIONS = Number(process.env.DEPOSIT_REQUIRED_CONFIRMATIONS || 1);
+
+let _depositWatcherRunning = false;
+
+async function depositWatcherCycle() {
+  // Expire stale requests first
+  const expired = await expireStaleDeposits();
+  if (expired.length > 0) {
+    console.log(`[${nowIso()}] [DepositWatcher] Expired ${expired.length} stale deposit request(s)`);
+  }
+
+  // Fetch all pending/confirming requests
+  const active = await getActiveDepositRequests();
+  if (active.length === 0) return;
+
+  console.log(`[${nowIso()}] [DepositWatcher] Checking ${active.length} active deposit request(s)`);
+
+  for (const req of active) {
+    const tag = `[DepositWatcher] wallet=${req.wallet_key} addr=${req.deposit_address.slice(0, 16)}…`;
+    try {
+      // Scan the UTXO set for this address
+      const scan = await rpcRequest('scantxoutset', ['start', [`addr(${req.deposit_address})`]]);
+      const unspents = Array.isArray(scan?.unspents) ? scan.unspents : [];
+
+      if (unspents.length === 0) {
+        // Nothing received yet — check mempool for unconfirmed tx
+        const mempool = await rpcRequest('getrawmempool', [true]);
+        const mempoolTxids = Object.keys(mempool || {});
+        let mempoolHit = null;
+
+        for (const txid of mempoolTxids) {
+          try {
+            const raw = await rpcRequest('getrawtransaction', [txid, true]);
+            const matchingVout = (raw.vout || []).find((v) =>
+              v.scriptPubKey?.address === req.deposit_address
+            );
+            if (matchingVout) {
+              mempoolHit = { txid, sats: btcToSats(matchingVout.value) };
+              break;
+            }
+          } catch (_) { /* skip */ }
+        }
+
+        if (mempoolHit && req.status === 'pending') {
+          await updateDepositDetected({
+            id: req.id,
+            depositTxid: mempoolHit.txid,
+            receivedSats: mempoolHit.sats,
+            confirmations: 0,
+          });
+          console.log(`${tag} — tx detected in mempool txid=${mempoolHit.txid} sats=${mempoolHit.sats}`);
+        }
+        continue;
+      }
+
+      // UTXO found in confirmed UTXO set
+      const utxo = unspents[0];
+      const receivedSats = btcToSats(utxo.amount);
+
+      // Get confirmation count from the tx
+      let confirmations = 0;
+      let txid = req.deposit_txid;
+      try {
+        const raw = await rpcRequest('getrawtransaction', [utxo.txid, true]);
+        confirmations = raw.confirmations || 0;
+        txid = utxo.txid;
+      } catch (_) { /* use existing txid */ }
+
+      // Update detected if not already
+      if (req.status === 'pending') {
+        await updateDepositDetected({
+          id: req.id,
+          depositTxid: txid,
+          receivedSats,
+          confirmations,
+        });
+        console.log(`${tag} — tx confirmed on-chain txid=${txid} sats=${receivedSats} confirmations=${confirmations}`);
+      } else {
+        await updateDepositConfirmations({ id: req.id, confirmations });
+      }
+
+      // Check if we have enough confirmations
+      const required = req.required_confirmations || DEPOSIT_REQUIRED_CONFIRMATIONS;
+      if (confirmations < required) {
+        console.log(`${tag} — ${confirmations}/${required} confirmations, waiting…`);
+        continue;
+      }
+
+      // Validate amount (allow up to 10% variance for fee fluctuations)
+      if (receivedSats < req.expected_sats * 0.9) {
+        await markDepositFailed({
+          id: req.id,
+          errorMessage: `Received ${receivedSats} sats but expected at least ${Math.floor(req.expected_sats * 0.9)} sats`,
+        });
+        console.warn(`${tag} — insufficient amount received (${receivedSats} sats), marking failed`);
+        continue;
+      }
+
+      // Confirmed and valid — call /createutxos on the wallet's node
+      console.log(`${tag} — ${confirmations} confirmations reached, calling /createutxos…`);
+      const apiBase = resolveRgbNodeApiBaseForAccountRef(req.node_account_ref);
+
+      let createResult;
+      try {
+        createResult = await rgbNodeRequestWithBase(apiBase, '/createutxos', {
+          up_to: false,
+          num: 1,
+          size: 32500,
+          fee_rate: 5,
+          skip_sync: false,
+        });
+      } catch (nodeErr) {
+        await markDepositFailed({ id: req.id, errorMessage: nodeErr.message });
+        console.error(`${tag} — /createutxos failed: ${nodeErr.message}`);
+        continue;
+      }
+
+      // Record the new slot as FREE
+      const slot = await upsertUtxoSlot({
+        walletId: req.wallet_id,
+        outpoint: `${txid}:0`,         // placeholder — actual outpoint from node if exposed
+        state: 'FREE',
+        satsValue: receivedSats,
+        nodeAccountRef: req.node_account_ref,
+        invoiceId: null,
+        transferId: null,
+      });
+
+      // Mark deposit confirmed
+      await markDepositConfirmed({ id: req.id, utxoSlotId: slot.id });
+
+      console.log(`${tag} — slot created FREE outpoint=${slot.outpoint} slotId=${slot.id} ✓`);
+    } catch (err) {
+      console.error(`${tag} — unexpected error: ${err.message}`);
+    }
+  }
+}
+
+async function runDepositWatcherCycle() {
+  if (_depositWatcherRunning) return;
+  _depositWatcherRunning = true;
+  try {
+    await depositWatcherCycle();
+  } catch (err) {
+    console.error(`[${nowIso()}] [DepositWatcher] Unhandled error:`, err.message);
+  } finally {
+    _depositWatcherRunning = false;
+  }
+}
+
+function startDepositWatcher() {
+  console.log(`[${nowIso()}] [DepositWatcher] Started (interval=${DEPOSIT_WATCHER_INTERVAL_MS}ms, required_confirmations=${DEPOSIT_REQUIRED_CONFIRMATIONS})`);
+  setInterval(runDepositWatcherCycle, DEPOSIT_WATCHER_INTERVAL_MS);
+  setImmediate(runDepositWatcherCycle);
+}
+
 async function start() {
   await ensureState();
   const server = http.createServer((req, res) => {
@@ -3363,6 +5020,7 @@ async function start() {
       `[${nowIso()}] PhotonBolt faucet listening on http://127.0.0.1:${PORT} using wallet ${RPC_WALLET}`
     );
     startReceiverWatchdog();
+    startDepositWatcher();
   });
 }
 

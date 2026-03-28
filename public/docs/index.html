@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Faucet Repo Guide</title>
+  <meta
+    name="description"
+    content="Documentation for the PhotonBolt faucet repo, its HTML pages, API flows, database tables, and RGB settlement pipeline."
+  />
+  <link rel="stylesheet" href="/docs.css?v=20260327a" />
+</head>
+<body>
+  <div class="docs-shell">
+    <header class="docs-header">
+      <p class="eyebrow">PhotonBolt Docs</p>
+      <h1>Photon Faucet Repo Guide</h1>
+      <p class="lede">
+        This document explains what this repository does, how the HTML pages are connected to the
+        backend, and where the faucet, RGB wallet, registry, and settlement logic live.
+      </p>
+    </header>
+
+    <main class="docs-layout">
+      <section class="docs-card">
+        <h2>1. Repo purpose</h2>
+        <p>
+          This repo is not only a Bitcoin regtest faucet. It is a single Node.js service that also
+          exposes RGB wallet helper APIs, an RGB asset registry, transfer inspection endpoints, and
+          a watchdog-driven settlement flow for PhotonBolt regtest development.
+        </p>
+        <p>
+          The entrypoint is <code>server.js</code>. It serves static files from <code>public/</code>,
+          talks to Bitcoin Core over RPC, talks to one or two RGB node APIs over HTTP, stores RGB
+          wallet state in PostgreSQL, and stores basic faucet cooldown history in
+          <code>data/claims.json</code>.
+        </p>
+      </section>
+
+      <section class="docs-card">
+        <h2>2. HTML pages and what they do</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Page</th>
+                <th>Frontend file</th>
+                <th>Main API calls</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>/</code></td>
+                <td><code>public/index.html</code> + <code>public/app.js</code></td>
+                <td><code>GET /api/status</code>, <code>POST /api/claim</code></td>
+                <td>Main regtest faucet page for sending BTC to a <code>bcrt1...</code> address.</td>
+              </tr>
+              <tr>
+                <td><code>/asset-registry.html</code></td>
+                <td><code>public/asset-registry.html</code> + <code>public/asset-registry.js</code></td>
+                <td><code>GET /api/rgb/registry</code></td>
+                <td>Lists known RGB assets from PostgreSQL and lets the user copy/import contract IDs.</td>
+              </tr>
+              <tr>
+                <td><code>/asset-transactions.html?assetId=...</code></td>
+                <td><code>public/asset-transactions.html</code> + <code>public/asset-transactions.js</code></td>
+                <td><code>GET /api/rgb/registry/transfers</code></td>
+                <td>Shows transfer history for one asset by combining registry data with RGB node transfer data.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="docs-card">
+        <h2>3. How the main homepage works</h2>
+        <ul>
+          <li><code>public/index.html</code> is a static shell with a status rail, faucet form, workflow notes, and a recent activity table.</li>
+          <li><code>public/app.js</code> calls <code>/api/status</code> on load to populate network, balance, chain height, cooldown, and allowed amounts.</li>
+          <li>The amount chips are local UI state only until submit; the chosen amount is posted as <code>amountBtc</code>.</li>
+          <li>Submitting the form sends JSON to <code>POST /api/claim</code>.</li>
+          <li>If the claim succeeds, the page stores the txid and address in browser <code>localStorage</code> under <code>photonbolt_faucet_recent_activity</code>.</li>
+          <li>The “Recent Activity” table is therefore browser-local, not a shared server activity feed.</li>
+          <li>The paste button uses the Clipboard API, and Ctrl+Enter submits the form.</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>4. Backend request flow</h2>
+        <ol>
+          <li>The HTTP server is created in <code>server.js</code> using Node’s built-in <code>http</code> module.</li>
+          <li>Requests are routed manually by pathname, not by Express or another framework.</li>
+          <li>Static files are served from <code>public/</code>; <code>/</code> resolves to <code>/index.html</code>.</li>
+          <li><code>GET /api/status</code> calls Bitcoin Core RPC methods such as <code>getblockchaininfo</code>, <code>getwalletinfo</code>, and <code>getbalance</code>.</li>
+          <li><code>POST /api/claim</code> validates the address, enforces a cooldown, sends BTC with <code>sendtoaddress</code>, then mines blocks with <code>generatetoaddress</code>.</li>
+          <li>Most RGB endpoints first resolve a wallet key from the <code>x-photon-wallet-key</code> header and upsert that wallet into PostgreSQL.</li>
+        </ol>
+      </section>
+
+      <section class="docs-card">
+        <h2>5. Storage model</h2>
+        <p>There are two distinct storage layers in this repo.</p>
+        <ul>
+          <li><code>data/claims.json</code>: a lightweight file store for faucet cooldown records by IP and address.</li>
+          <li>PostgreSQL via <code>db.js</code>: the persistent store for wallets, wallet assets, RGB invoices, transfers, consignments, and transfer events.</li>
+        </ul>
+        <p>The most important PostgreSQL tables are:</p>
+        <ul>
+          <li><code>wallets</code>: one row per logical wallet key.</li>
+          <li><code>wallet_assets</code>: assets visible to each wallet.</li>
+          <li><code>wallet_asset_balances</code>: derived settled/future/spendable balances.</li>
+          <li><code>rgb_invoices</code>: invoices generated or tracked by the backend.</li>
+          <li><code>rgb_transfers</code>: incoming and outgoing transfer rows.</li>
+          <li><code>consignment_records</code>: proxy/consignment delivery tracking.</li>
+          <li><code>transfer_events</code>: append-only event log for important workflow steps.</li>
+          <li><code>asset_registry</code>: public-facing RGB asset catalog used by the registry pages.</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>6. RGB endpoints in plain language</h2>
+        <ul>
+          <li><code>/api/rgb/invoice</code>: creates a normal RGB invoice and records it in PostgreSQL.</li>
+          <li><code>/api/rgb/ln-invoice</code>: creates an RGB-over-Lightning invoice on the user account ref.</li>
+          <li><code>/api/rgb/invoice/register</code>: registers a browser-provided blinding secret/recipient pairing.</li>
+          <li><code>/api/rgb/balance</code>: syncs a wallet asset from the RGB node, refreshes transfers, and returns derived balance numbers.</li>
+          <li><code>/api/rgb/transfers</code>: returns wallet-scoped transfer history for one asset.</li>
+          <li><code>/api/rgb/send</code>: decodes an invoice, sends RGB assets, syncs transfer rows, and returns the matched transfer.</li>
+          <li><code>/api/rgb/pay-lightning</code>: pays an RGB Lightning invoice and starts the async settlement pipeline.</li>
+          <li><code>/api/rgb/refresh</code>: forces the node to refresh transfers and re-derives balances.</li>
+          <li><code>/api/rgb/settlement-status</code>: polling endpoint for non-terminal settlement states so UIs can update without WebSockets.</li>
+          <li><code>/api/rgb/registry</code> and <code>/api/rgb/registry/transfers</code>: public asset catalog and transfer history used by the HTML pages.</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>7. Settlement pipeline</h2>
+        <p>
+          The repo contains a multi-stage settlement flow for RGB Lightning transfers. The enum added
+          in <code>db/migrations/003_settlement_pipeline.sql</code> tracks these phases:
+        </p>
+        <ul>
+          <li><code>INITIATED</code>: the backend created a pending transfer record before touching the node.</li>
+          <li><code>PAYMENT_SUCCESS</code>: the Lightning payment succeeded and a preimage/payment hash exists.</li>
+          <li><code>CONSIGNMENT_UPLOADED</code>: the consignment was uploaded to the proxy.</li>
+          <li><code>SETTLED</code>: the receiver validated the asset and the transfer reached a terminal success state.</li>
+        </ul>
+        <p>
+          A background watchdog in <code>server.js</code> runs two jobs: one confirms sender-side ACKs
+          from the proxy, and the other forces receiver-side refresh/reconciliation until incoming
+          transfers settle or fail validation.
+        </p>
+      </section>
+
+      <section class="docs-card">
+        <h2>8. Important files to read first</h2>
+        <ul>
+          <li><code>server.js</code>: all routing, RPC calls, RGB orchestration, static serving, and watchdog logic.</li>
+          <li><code>db.js</code>: PostgreSQL pool and wallet/asset upsert helpers.</li>
+          <li><code>public/index.html</code> and <code>public/app.js</code>: faucet UI.</li>
+          <li><code>public/asset-registry.html</code> and <code>public/asset-registry.js</code>: public asset registry UI.</li>
+          <li><code>public/asset-transactions.html</code> and <code>public/asset-transactions.js</code>: asset transfer inspection UI.</li>
+          <li><code>db/migrations/001_rgb_wallets.sql</code>, <code>002_asset_registry.sql</code>, and <code>003_settlement_pipeline.sql</code>: schema foundation.</li>
+          <li><code>README.md</code>: operational basics for running and deploying the faucet.</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>9. Mental model</h2>
+        <p>
+          The simplest way to think about this repo is: one Node process exposes a public faucet UI,
+          a public RGB asset browser, and several wallet-scoped RGB APIs; Bitcoin Core handles BTC,
+          RGB nodes handle asset operations, PostgreSQL stores durable wallet state, and a watchdog
+          reconciles delayed settlement work in the background.
+        </p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
