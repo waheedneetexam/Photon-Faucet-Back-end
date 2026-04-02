@@ -201,7 +201,9 @@ const RGB_NODE_UNLOCK_DEFAULTS = {
     announceAlias: 'photon-rln-user-b',
   },
 };
-const ADMIN_WALLET_ADDRESS = 'bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95';
+const ADMIN_WALLET_ADDRESS = typeof process.env.PHOTON_ADMIN_WALLET_ADDRESS === 'string'
+  ? process.env.PHOTON_ADMIN_WALLET_ADDRESS.trim()
+  : '';
 const ADMIN_AUTH_HEADER = 'x-photon-admin-token';
 const BOARD_AUTH_HEADER = 'x-photon-board-token';
 const BOARD_SHARED_TOKEN = process.env.PHOTON_BOARD_SHARED_TOKEN || 'photon-board-auth-v1';
@@ -815,6 +817,11 @@ async function handleAdminAuthChallenge(res, parsedUrl) {
     ? parsedUrl.searchParams.get('address').trim()
     : '';
 
+  if (!ADMIN_WALLET_ADDRESS) {
+    sendJson(res, 503, { ok: false, error: 'Admin wallet is not configured on the server.' });
+    return;
+  }
+
   if (!address) {
     sendJson(res, 400, { ok: false, error: 'address is required.' });
     return;
@@ -857,6 +864,11 @@ async function handleAdminAuthVerify(req, res) {
 
   if (!challengeId || !address || !signature) {
     sendJson(res, 400, { ok: false, error: 'challengeId, address, and signature are required.' });
+    return;
+  }
+
+  if (!ADMIN_WALLET_ADDRESS) {
+    sendJson(res, 503, { ok: false, error: 'Admin wallet is not configured on the server.' });
     return;
   }
 
@@ -912,6 +924,14 @@ async function handleAdminAuthLogout(req, res) {
     adminSessions.delete(session.token);
   }
   sendJson(res, 200, { ok: true });
+}
+
+async function handleAdminAuthConfig(res) {
+  sendJson(res, 200, {
+    ok: true,
+    adminWalletAddress: ADMIN_WALLET_ADDRESS || null,
+    adminConfigured: Boolean(ADMIN_WALLET_ADDRESS),
+  });
 }
 
 async function handleRgbWalletAssignmentUpdate(req, res) {
@@ -6949,6 +6969,11 @@ async function requestHandler(req, res) {
 
   if (req.method === 'GET' && pathname === '/api/admin/auth/challenge') {
     await handleAdminAuthChallenge(res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/admin/auth/config') {
+    await handleAdminAuthConfig(res);
     return;
   }
 

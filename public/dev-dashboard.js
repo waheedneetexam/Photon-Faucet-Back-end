@@ -142,7 +142,7 @@ const LIGHT_ASSET_CANDIDATES = [
 
 const PLM_STATE_KEY = 'photonbolt-dev-dashboard-plm-state-v1';
 const ADMIN_SESSION_STORAGE_KEY = 'photonbolt-dev-admin-session-v1';
-const ADMIN_WALLET_ADDRESS = 'bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95';
+let adminWalletAddress = '';
 
 function shorten(value, start = 10, end = 8) {
   if (!value || value.length <= start + end + 3) return value || '-';
@@ -245,7 +245,26 @@ function getConnectedWalletAddress() {
 }
 
 function isAdminWalletAddress(address) {
-  return typeof address === 'string' && address.trim() === ADMIN_WALLET_ADDRESS;
+  return Boolean(adminWalletAddress) && typeof address === 'string' && address.trim() === adminWalletAddress;
+}
+
+async function loadAdminConfig() {
+  try {
+    const response = await fetch('/api/admin/auth/config', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || 'Failed to load admin configuration.');
+    }
+    adminWalletAddress = typeof payload.adminWalletAddress === 'string' ? payload.adminWalletAddress.trim() : '';
+  } catch (error) {
+    console.error('Admin config load failed:', error);
+    adminWalletAddress = '';
+  }
+
+  updateAdminUi();
 }
 
 function setAdminAuthStatus(message) {
@@ -286,6 +305,16 @@ function updateAdminUi() {
 
   if (adminLogoutButton) {
     adminLogoutButton.disabled = !isAuthenticated;
+  }
+
+  if (!adminWalletAddress) {
+    setAdminAuthStatus('Admin wallet is not configured on the server.');
+    if (activeDashboardTab === 'admin') {
+      setActiveDashboardTab('overview');
+    } else {
+      setActiveDashboardTab(activeDashboardTab);
+    }
+    return;
   }
 
   if (!matchesAdminWallet) {
@@ -2179,6 +2208,7 @@ if (photonProvider) {
 plmState = null;
 adminSessionToken = loadStoredAdminSessionToken();
 renderPlmState();
+loadAdminConfig().catch(() => {});
 updateAdminUi();
 setActiveDashboardTab('overview');
 loadDashboard();

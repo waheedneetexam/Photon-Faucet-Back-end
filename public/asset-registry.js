@@ -1,5 +1,5 @@
 const ADMIN_SESSION_STORAGE_KEY = 'photonbolt-dev-admin-session-v1';
-const ADMIN_WALLET_ADDRESS = 'bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95';
+let adminWalletAddress = '';
 
 const registryBody = document.getElementById('registry-body');
 const registrySearch = document.getElementById('registry-search');
@@ -65,7 +65,7 @@ function getPhotonProvider() {
 }
 
 function isAdminWalletAddress(address) {
-  return typeof address === 'string' && address.trim() === ADMIN_WALLET_ADDRESS;
+  return Boolean(adminWalletAddress) && typeof address === 'string' && address.trim() === adminWalletAddress;
 }
 
 function isAdminAuthenticated() {
@@ -104,7 +104,9 @@ function updateAdminUi() {
     adminLogoutButton.disabled = !adminSessionToken;
   }
 
-  if (!connectedAddress) {
+  if (!adminWalletAddress) {
+    setAdminStatus('Admin wallet is not configured on the server.');
+  } else if (!connectedAddress) {
     setAdminStatus('Connect Photon Wallet to continue.');
   } else if (!isAdminAddress) {
     setAdminStatus(`Connected wallet ${shorten(connectedAddress, 8, 6)} is not the configured admin wallet.`);
@@ -113,6 +115,25 @@ function updateAdminUi() {
   } else {
     setAdminStatus('Configured admin wallet detected. Sign the Photon challenge to unlock archive controls.');
   }
+}
+
+async function loadAdminConfig() {
+  try {
+    const response = await fetch('/api/admin/auth/config', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || 'Failed to load admin configuration.');
+    }
+    adminWalletAddress = typeof payload.adminWalletAddress === 'string' ? payload.adminWalletAddress.trim() : '';
+  } catch (error) {
+    console.error('Admin config load failed:', error);
+    adminWalletAddress = '';
+  }
+
+  updateAdminUi();
 }
 
 async function copyText(value) {
@@ -495,6 +516,7 @@ window.addEventListener('photonbolt#initialized', () => {
 });
 
 (async () => {
+  await loadAdminConfig();
   await refreshConnectedWalletState();
 
   const photon = getPhotonProvider();
