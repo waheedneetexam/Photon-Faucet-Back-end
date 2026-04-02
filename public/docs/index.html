@@ -154,7 +154,129 @@
       </section>
 
       <section class="docs-card">
-        <h2>8. Important files to read first</h2>
+        <h2>8. Same-node wallets</h2>
+        <p>
+          A normal RGB Lightning payment should only be used when the sender wallet and receiver
+          wallet resolve to different RGB node account refs. If both wallets resolve to the same
+          node, the backend will treat that as a same-node wallet pair rather than a real
+          Lightning route.
+        </p>
+        <p>
+          The reason is simple: the receiver invoice is created on the same node that the sender
+          would use for payment, so the payment becomes a self-transfer at the node level. That is
+          the wrong place to force Lightning semantics.
+        </p>
+        <ul>
+          <li>Different sender and receiver node refs: use normal <code>/api/rgb/pay-lightning</code>.</li>
+          <li>Same sender and receiver node ref: switch to an internal same-node wallet transfer path.</li>
+        </ul>
+        <p>The planned same-node flow is:</p>
+        <ol>
+          <li>Receiver creates the invoice as usual.</li>
+          <li>Backend stores the invoice with the receiver wallet and node account ref.</li>
+          <li>Sender pastes the invoice into the send flow.</li>
+          <li>Backend resolves sender wallet, receiver wallet, and both node refs.</li>
+          <li>If both node refs match, backend does not call <code>/sendpayment</code>.</li>
+          <li>Backend creates linked outgoing and incoming transfer rows in PostgreSQL.</li>
+          <li>Backend records settlement events and recalculates both wallet balances.</li>
+          <li>UI shows the result as an internal same-node transfer, not as a true Lightning payment.</li>
+        </ol>
+        <p>
+          This design is preferred over adding a middle relay node because it avoids introducing a
+          synthetic two-leg payment that can partially succeed and leave the system holding funds
+          between hops.
+        </p>
+      </section>
+
+      <section class="docs-card">
+        <h2>9. RGB Asset Issuance</h2>
+        <p>
+          The recommended product model for user-created RGB assets in PhotonBolt is a
+          backend-driven issuance flow. The wallet should provide the UI and approval flow, while
+          the backend performs the actual RGB issuance on an issuer-capable node and records the
+          result in PostgreSQL.
+        </p>
+        <p>
+          This matches the current architecture better than direct issuance from the browser
+          extension because the backend already owns wallet-scoped RGB runtime operations, invoice
+          storage, transfer storage, and registry persistence.
+        </p>
+        <p>
+          RGB asset issuance requires Bitcoin UTXOs. The issuing wallet must have BTC available for
+          fees and at least one usable issuance-ready UTXO or seal output before the backend can
+          create the asset.
+        </p>
+        <p>The planned issuance flow is:</p>
+        <ol>
+          <li>User opens an <code>Issue Asset</code> screen in the wallet.</li>
+          <li>User enters asset metadata such as name, ticker, precision, supply, and optional visibility settings.</li>
+          <li>Wallet calls a backend issuance API using <code>x-photon-wallet-key</code>.</li>
+          <li>Backend validates the request and checks whether the wallet has enough BTC and issuance-ready UTXO state.</li>
+          <li>Backend routes the request to an issuer-capable RGB node, ideally the dedicated issuer node for the first version.</li>
+          <li>Backend creates the RGB asset and receives the resulting contract id and issuance metadata.</li>
+          <li>Backend stores the issuance workflow state in PostgreSQL.</li>
+          <li>Backend inserts or updates the public <code>asset_registry</code> row if the asset is meant to be visible in the registry.</li>
+          <li>Backend imports the newly issued asset into the issuing wallet’s <code>wallet_assets</code> view.</li>
+          <li>Wallet shows a success screen with the contract id, registry state, and import status.</li>
+        </ol>
+        <p>The backend work should include:</p>
+        <ul>
+          <li><code>POST /api/rgb/issue-asset</code> to create a new fungible RGB asset.</li>
+          <li><code>GET /api/rgb/issue-asset/:id</code> to inspect issuance status.</li>
+          <li>Optional <code>GET /api/rgb/my-issued-assets</code> for wallet history.</li>
+          <li>A dedicated workflow table such as <code>rgb_asset_issuances</code> separate from the public <code>asset_registry</code>.</li>
+          <li>Funding and UTXO readiness checks before issuance starts.</li>
+        </ul>
+        <p>The wallet UI should include:</p>
+        <ul>
+          <li>An <code>Issue Asset</code> form with name, ticker, precision, supply, description, and visibility controls.</li>
+          <li>A funding-readiness panel showing whether the wallet can issue immediately.</li>
+          <li>A review-and-confirm step before submission.</li>
+          <li>A success screen with contract id copy, import confirmation, and optional registry link.</li>
+          <li>A future <code>My Issued Assets</code> view for issuance history.</li>
+        </ul>
+        <p>
+          For the first version, the cleanest implementation is to issue through the dedicated
+          issuer node and record the user wallet as the logical issuer in database metadata and
+          registry fields such as <code>issuer_ref</code>. A later version can support true
+          per-user issuer runtimes if the backend ownership model changes.
+        </p>
+      </section>
+
+      <section class="docs-card">
+        <h2>10. Preview Faucet Steps</h2>
+        <p>
+          The preview site at <code>photonbolt.xyz/preview</code> should link directly into the live
+          PhotonBolt faucet stack rather than placeholder tools. These step pages document the
+          actual user flow from the preview UI into the public faucet, registry, and RGB faucet.
+        </p>
+        <ul>
+          <li><a href="/docs/preview-regtest-faucet-steps.html">Preview RegTest Faucet Steps</a></li>
+          <li><a href="/docs/preview-rgb-asset-faucet-steps.html">Preview RGB Asset Faucet Steps</a></li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>11. RGB Issuance to Primary Channel Bootstrap</h2>
+        <p>
+          A newly issued asset and a Lightning-ready asset are not the same thing. PhotonBolt now
+          has a dedicated design contract for the optional flow that reserves part of a new asset’s
+          supply for liquidity, commits Bitcoin to the first channel, and marks the asset as
+          <code>LIGHTNING_READY</code> only after the primary RGB Lightning channel is actually
+          usable.
+        </p>
+        <ul>
+          <li>Registry-only and Lightning-ready are separate lifecycle states.</li>
+          <li>The full issued supply lands in the requesting wallet first.</li>
+          <li>A user-selected percentage can be reserved for channel liquidity after issuance.</li>
+          <li>BTC funding can happen during issuance or later.</li>
+          <li>Channel bootstrap failure does not invalidate the asset; it leaves a retryable state.</li>
+        </ul>
+        <p>Read the full spec in <code>/rgb-issuance-primary-channel-bootstrap.html</code>.</p>
+      </section>
+
+      <section class="docs-card">
+        <h2>12. Important files to read first</h2>
         <ul>
           <li><code>server.js</code>: all routing, RPC calls, RGB orchestration, static serving, and watchdog logic.</li>
           <li><code>db.js</code>: PostgreSQL pool and wallet/asset upsert helpers.</li>
@@ -167,7 +289,7 @@
       </section>
 
       <section class="docs-card">
-        <h2>9. Mental model</h2>
+        <h2>13. Mental model</h2>
         <p>
           The simplest way to think about this repo is: one Node process exposes a public faucet UI,
           a public RGB asset browser, and several wallet-scoped RGB APIs; Bitcoin Core handles BTC,

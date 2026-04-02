@@ -11,6 +11,7 @@ const elements = {
   message: document.getElementById('messageBox'),
   invoiceKind: document.getElementById('invoiceKindValue'),
   assetId: document.getElementById('assetIdValue'),
+  assetName: document.getElementById('assetNameValue'),
   amount: document.getElementById('amountValue'),
   recipient: document.getElementById('recipientValue'),
   decodedStatus: document.getElementById('decodedStatusValue'),
@@ -65,17 +66,46 @@ function resetDecodedInvoice() {
   decodedInvoice = null;
   setText(elements.invoiceKind, '-');
   setText(elements.assetId, '-');
+  setText(elements.assetName, '-');
   setText(elements.amount, '-');
   setText(elements.recipient, '-');
   setText(elements.decodedStatus, '-');
   setText(elements.decodeState, 'Awaiting invoice');
 }
 
-function renderDecodedInvoice(payload) {
+function findRegistryAssetName(assetId) {
+  if (!assetId) return null;
+  const match = registryRows.find((row) => row?.contract_id === assetId || row?.asset_id === assetId);
+  return match?.token_name || match?.name || null;
+}
+
+async function ensureRegistryName(assetId) {
+  const existing = findRegistryAssetName(assetId);
+  if (existing) return existing;
+
+  try {
+    const response = await fetch('/api/rgb/registry');
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      return null;
+    }
+    registryRows = Array.isArray(payload.assets) ? payload.assets : registryRows;
+    return findRegistryAssetName(assetId);
+  } catch {
+    return null;
+  }
+}
+
+async function renderDecodedInvoice(payload) {
   decodedInvoice = payload;
   const decoded = payload?.decoded || {};
   const invoiceKind = payload?.invoiceKind || detectInvoiceKind(elements.invoice?.value || '');
   const assetId = decoded.asset_id || '-';
+  const assetName =
+    decoded.asset_name ||
+    decoded.name ||
+    await ensureRegistryName(decoded.asset_id) ||
+    '-';
   const amount = invoiceKind === 'lightning'
     ? decoded.asset_amount || '-'
     : decoded?.assignment?.value || '-';
@@ -84,6 +114,7 @@ function renderDecodedInvoice(payload) {
 
   setText(elements.invoiceKind, invoiceKind || '-');
   setText(elements.assetId, assetId);
+  setText(elements.assetName, assetName);
   setText(elements.amount, String(amount));
   setText(elements.recipient, recipient);
   setText(elements.decodedStatus, status);
@@ -299,7 +330,7 @@ async function decodeInvoice() {
     if (!response.ok || !payload.ok) {
       throw new Error(payload.error || 'Invoice decode failed.');
     }
-    renderDecodedInvoice({
+    await renderDecodedInvoice({
       invoiceKind,
       decoded: payload.decoded,
     });

@@ -27,6 +27,25 @@ async function query(text, params = []) {
   return pool.query(text, params);
 }
 
+async function withTransaction(callback) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('[RGB DB] Failed to rollback transaction:', rollbackError);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureWallet(req, network = 'regtest', { generateFundingAddress = null } = {}) {
   const walletKey = resolveWalletKey(req);
 
@@ -351,6 +370,93 @@ async function expireStaleDeposits() {
 }
 
 let _channelApplicationsTableReady = false;
+let _rgbNodesTableReady = false;
+let _rgbAssetIssuancesTableReady = false;
+
+async function ensureRgbNodesTable() {
+  if (_rgbNodesTableReady) {
+    return;
+  }
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rgb_nodes (
+      account_ref TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      api_base TEXT NOT NULL,
+      role TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`CREATE INDEX IF NOT EXISTS idx_rgb_nodes_enabled_sort ON rgb_nodes(enabled, sort_order, account_ref)`);
+  _rgbNodesTableReady = true;
+}
+
+async function upsertRgbNode({
+  accountRef,
+  label,
+  apiBase,
+  role = 'user',
+  enabled = true,
+  sortOrder = 0,
+  metadata = {},
+}) {
+  await ensureRgbNodesTable();
+  const result = await query(
+    `INSERT INTO rgb_nodes (
+       account_ref, label, api_base, role, enabled, sort_order, metadata
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+     ON CONFLICT (account_ref)
+     DO UPDATE SET
+       label = EXCLUDED.label,
+       api_base = EXCLUDED.api_base,
+       role = EXCLUDED.role,
+       enabled = EXCLUDED.enabled,
+       sort_order = EXCLUDED.sort_order,
+       metadata = EXCLUDED.metadata,
+       updated_at = NOW()
+     RETURNING *`,
+    [
+      accountRef,
+      label,
+      apiBase,
+      role,
+      enabled,
+      sortOrder,
+      JSON.stringify(metadata || {}),
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function listRgbNodes({ enabledOnly = false } = {}) {
+  await ensureRgbNodesTable();
+  const result = await query(
+    `SELECT *
+     FROM rgb_nodes
+     WHERE ($1::boolean = false OR enabled = true)
+     ORDER BY sort_order ASC, account_ref ASC`,
+    [enabledOnly]
+  );
+  return result.rows;
+}
+
+async function getRgbNodeByAccountRef(accountRef) {
+  await ensureRgbNodesTable();
+  const result = await query(
+    `SELECT *
+     FROM rgb_nodes
+     WHERE account_ref = $1
+     LIMIT 1`,
+    [accountRef]
+  );
+  return result.rows[0] || null;
+}
 
 async function ensureChannelApplicationsTable() {
   if (_channelApplicationsTableReady) {
@@ -387,6 +493,50 @@ async function ensureChannelApplicationsTable() {
   await query(`CREATE INDEX IF NOT EXISTS idx_channel_applications_status ON channel_applications(status)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_channel_applications_deposit_request_id ON channel_applications(deposit_request_id)`);
   _channelApplicationsTableReady = true;
+}
+
+async function ensureRgbAssetIssuancesTable() {
+  if (_rgbAssetIssuancesTableReady) {
+    return;
+  }
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rgb_asset_issuances (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      wallet_id UUID REFERENCES wallets(id) ON DELETE SET NULL,
+      node_account_ref TEXT NOT NULL,
+      network TEXT NOT NULL CHECK (network IN ('mainnet', 'testnet3', 'testnet4', 'regtest')),
+      schema TEXT NOT NULL DEFAULT 'NIA',
+      token_name TEXT NOT NULL,
+      ticker TEXT,
+      precision INTEGER NOT NULL DEFAULT 0,
+      total_supply NUMERIC(30, 0) NOT NULL,
+      contract_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'issuing', 'issued', 'failed')),
+      liquidity_percentage NUMERIC(5, 2),
+      reserved_asset_amount NUMERIC(30, 0),
+      requested_channel_btc_sats BIGINT,
+      channel_bootstrap_mode TEXT,
+      lifecycle_status TEXT NOT NULL DEFAULT 'issued_registry_only',
+      primary_channel_id TEXT,
+      last_error TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS liquidity_percentage NUMERIC(5, 2)`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS reserved_asset_amount NUMERIC(30, 0)`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS requested_channel_btc_sats BIGINT`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS channel_bootstrap_mode TEXT`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'issued_registry_only'`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS primary_channel_id TEXT`);
+  await query(`ALTER TABLE rgb_asset_issuances ADD COLUMN IF NOT EXISTS last_error TEXT`);
+
+  await query(`CREATE INDEX IF NOT EXISTS idx_rgb_asset_issuances_wallet_created ON rgb_asset_issuances(wallet_id, created_at DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_rgb_asset_issuances_contract ON rgb_asset_issuances(contract_id)`);
+  _rgbAssetIssuancesTableReady = true;
 }
 
 async function createChannelApplication({
@@ -531,11 +681,178 @@ async function markChannelApplicationActive({
   return result.rows[0] || null;
 }
 
+async function ensureBoardTicketStatusesTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_ticket_statuses (
+      ticket_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('todo', 'progress', 'review', 'done')),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function listBoardTicketStatuses() {
+  await ensureBoardTicketStatusesTable();
+  const result = await query(
+    `SELECT ticket_id, status, updated_at
+     FROM board_ticket_statuses
+     ORDER BY ticket_id ASC`
+  );
+  return result.rows;
+}
+
+async function upsertBoardTicketStatus({ ticketId, status }) {
+  await ensureBoardTicketStatusesTable();
+  const result = await query(
+    `INSERT INTO board_ticket_statuses (ticket_id, status, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (ticket_id)
+     DO UPDATE SET
+       status = EXCLUDED.status,
+       updated_at = NOW()
+     RETURNING ticket_id, status, updated_at`,
+    [ticketId, status]
+  );
+  return result.rows[0] || null;
+}
+
+async function ensureBoardTicketsTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_tickets (
+      ticket_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('todo', 'progress', 'review', 'done')),
+      priority TEXT NOT NULL CHECK (priority IN ('high', 'medium', 'low')),
+      category TEXT NOT NULL CHECK (category IN ('ui', 'android', 'node', 'token', 'research', 'backend', 'infra')),
+      estimate TEXT NOT NULL DEFAULT '1d',
+      assignee TEXT NOT NULL DEFAULT '—',
+      desc_html TEXT NOT NULL,
+      links JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function listBoardTickets() {
+  await ensureBoardTicketsTable();
+  const result = await query(
+    `SELECT
+       ticket_id,
+       title,
+       status,
+       priority,
+       category,
+       estimate,
+       assignee,
+       desc_html,
+       links,
+       created_at,
+       updated_at
+     FROM board_tickets
+     ORDER BY ticket_id ASC`
+  );
+  return result.rows;
+}
+
+async function createBoardTicket({
+  ticketId,
+  title,
+  status,
+  priority,
+  category,
+  estimate,
+  assignee,
+  descHtml,
+  links = [],
+}) {
+  await ensureBoardTicketsTable();
+  const result = await query(
+    `INSERT INTO board_tickets (
+       ticket_id, title, status, priority, category, estimate, assignee, desc_html, links, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW(), NOW())
+     RETURNING
+       ticket_id, title, status, priority, category, estimate, assignee, desc_html, links, created_at, updated_at`,
+    [
+      ticketId,
+      title,
+      status,
+      priority,
+      category,
+      estimate,
+      assignee,
+      descHtml,
+      JSON.stringify(Array.isArray(links) ? links : []),
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function updateBoardTicket({
+  ticketId,
+  title,
+  status,
+  priority,
+  category,
+  estimate,
+  assignee,
+  descHtml,
+  links = [],
+}) {
+  await ensureBoardTicketsTable();
+  const result = await query(
+    `UPDATE board_tickets
+     SET
+       title = $2,
+       status = $3,
+       priority = $4,
+       category = $5,
+       estimate = $6,
+       assignee = $7,
+       desc_html = $8,
+       links = $9::jsonb,
+       updated_at = NOW()
+     WHERE ticket_id = $1
+     RETURNING
+       ticket_id, title, status, priority, category, estimate, assignee, desc_html, links, created_at, updated_at`,
+    [
+      ticketId,
+      title,
+      status,
+      priority,
+      category,
+      estimate,
+      assignee,
+      descHtml,
+      JSON.stringify(Array.isArray(links) ? links : []),
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+async function deleteBoardTicket(ticketId) {
+  await ensureBoardTicketsTable();
+  const result = await query(
+    `DELETE FROM board_tickets
+     WHERE ticket_id = $1
+     RETURNING ticket_id`,
+    [ticketId]
+  );
+  return result.rows[0] || null;
+}
+
 module.exports = {
   pool,
   query,
+  withTransaction,
   ensureWallet,
   resolveWalletKey,
+  ensureRgbNodesTable,
+  upsertRgbNode,
+  listRgbNodes,
+  getRgbNodeByAccountRef,
+  ensureRgbAssetIssuancesTable,
   upsertWalletAsset,
   upsertWalletAssetBalance,
   // wallet address helpers
@@ -564,4 +881,12 @@ module.exports = {
   getChannelApplicationByInvoice,
   markChannelApplicationRgbFunded,
   markChannelApplicationActive,
+  ensureBoardTicketStatusesTable,
+  listBoardTicketStatuses,
+  upsertBoardTicketStatus,
+  ensureBoardTicketsTable,
+  listBoardTickets,
+  createBoardTicket,
+  updateBoardTicket,
+  deleteBoardTicket,
 };

@@ -128,6 +128,7 @@ function statusClass(status) {
 
 function accountRefLabel(accountRef) {
   if (accountRef === 'photon-rln-user') return 'User Node';
+  if (accountRef === 'photon-rln-user-b') return 'User Node B';
   if (accountRef === 'photon-rln-issuer') return 'Issuer Node';
   return accountRef || '-';
 }
@@ -417,7 +418,7 @@ function renderAssetSummaries(channels) {
           row.issuerMaxSingle = Math.max(row.issuerMaxSingle, amount);
         }
       }
-      if (node.accountRef === 'photon-rln-user') {
+      if (node.accountRef === 'photon-rln-user' || node.accountRef === 'photon-rln-user-b') {
         if (isReady) {
           row.userLocalTotal += amount;
           row.userMaxSingle = Math.max(row.userMaxSingle, amount);

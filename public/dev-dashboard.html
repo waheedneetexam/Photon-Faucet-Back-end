@@ -6,7 +6,7 @@
   <title>PhotonBolt Dev Channel Dashboard</title>
   <meta name="description" content="PhotonBolt RGB Lightning channel liquidity and payment dashboard." />
   <link rel="stylesheet" href="/asset-registry.css?v=20260328l" />
-  <link rel="stylesheet" href="/dev-dashboard.css?v=20260328a" />
+  <link rel="stylesheet" href="/dev-dashboard.css?v=20260329o" />
 </head>
 <body>
   <div class="registry-shell">
@@ -104,7 +104,13 @@
       </div>
     </section>
 
-    <section class="registry-card asset-summary-card">
+    <nav class="dashboard-tabs" aria-label="Dev dashboard sections">
+      <button class="dashboard-tab is-active" type="button" data-dashboard-tab="overview">Overview</button>
+      <button class="dashboard-tab" type="button" data-dashboard-tab="plm">Liquidity Miner</button>
+      <button id="admin-operator-tab" class="dashboard-tab hidden" type="button" data-dashboard-tab="admin">Admin / Operator</button>
+    </nav>
+
+    <section class="registry-card asset-summary-card" data-tab-panel="overview">
       <div class="panel-header">
         <div>
           <h2>Asset sendability summary</h2>
@@ -135,7 +141,7 @@
       </div>
     </section>
 
-    <section class="registry-card plm-plan-card">
+    <section class="registry-card plm-plan-card tab-panel-hidden" data-tab-panel="plm">
       <div class="panel-header">
         <div>
           <h2>Photon Liquidity Miner implementation checklist</h2>
@@ -178,7 +184,79 @@
       </div>
     </section>
 
-    <section class="registry-card plm-application-card">
+    <section id="admin-wallet-card" class="registry-card wallet-admin-card hidden tab-panel-hidden" data-tab-panel="admin">
+      <div class="panel-header">
+        <div>
+          <h2>Admin Access</h2>
+          <p class="registry-status form-note">
+            Wallet assignment controls are unlocked only after the configured admin wallet signs a server challenge.
+          </p>
+        </div>
+      </div>
+
+      <div class="toolbar-actions plm-top-actions">
+        <button id="admin-auth-button" class="page-btn action-btn" type="button">Unlock Admin Controls</button>
+        <button id="admin-logout-button" class="page-btn action-btn" type="button">Lock Admin Controls</button>
+      </div>
+
+      <p id="admin-auth-status" class="registry-status form-note">Connect the admin wallet to unlock sensitive controls.</p>
+    </section>
+
+    <section id="wallet-assignment-card" class="registry-card wallet-assignment-card hidden tab-panel-hidden" data-tab-panel="admin">
+      <div class="panel-header">
+        <div>
+          <h2>Wallet Assignment</h2>
+          <p class="registry-status form-note">
+            Manually bind each wallet to User Node, User Node B, or Issuer Node for controlled RGB testing.
+          </p>
+        </div>
+      </div>
+
+      <div class="toolbar-actions plm-top-actions">
+        <label class="control-field wallet-assignment-filter-field">
+          <span>Filter</span>
+          <input id="wallet-assignment-filter-input" type="text" placeholder="Wallet key or address" />
+        </label>
+        <label class="control-field wallet-assignment-filter-field">
+          <span>Type</span>
+          <select id="wallet-assignment-filter-type">
+            <option value="all">All wallets</option>
+            <option value="extension">Extension only</option>
+            <option value="assigned">Assigned only</option>
+            <option value="unassigned">Unassigned only</option>
+            <option value="devtest">Dev/Test only</option>
+          </select>
+        </label>
+        <label class="toggle-field wallet-assignment-force-field">
+          <input id="wallet-assignment-force-toggle" type="checkbox" />
+          <span>Force Assign</span>
+        </label>
+        <button id="wallet-assignment-refresh-button" class="page-btn action-btn" type="button">Refresh Wallets</button>
+      </div>
+
+      <p id="wallet-assignment-status" class="registry-status form-note">Loading wallet assignments...</p>
+
+      <div class="table-wrap">
+        <table class="registry-table compact-table wallet-assignment-table">
+          <thead>
+            <tr>
+              <th>Wallet Key</th>
+              <th>BTC Address</th>
+              <th>Current Node</th>
+              <th>Last Seen</th>
+              <th>Assign</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-assignment-body">
+            <tr class="loading-row">
+              <td colspan="5">Loading wallet assignments...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="registry-card plm-application-card tab-panel-hidden" data-tab-panel="plm">
       <div class="panel-header">
         <div>
           <h2>Photon Liquidity Miner</h2>
@@ -190,7 +268,7 @@
 
       <div class="toolbar-actions plm-top-actions">
         <button id="plm-use-selected" class="page-btn action-btn" type="button">Load Channel Value</button>
-        <button id="plm-apply-button" class="page-btn action-btn action-btn-primary" type="submit" form="plm-application-form">Create Funding Application</button>
+        <button id="plm-apply-button" class="page-btn action-btn" type="submit" form="plm-application-form">Create Funding Application</button>
         <button id="plm-reset-button" class="page-btn action-btn" type="button">Reset Draft</button>
         <button id="plm-refresh-button" class="page-btn action-btn" type="button">Refresh Draft State</button>
       </div>
@@ -217,12 +295,13 @@
       <form id="plm-application-form" class="open-channel-form plm-application-form">
         <label class="control-field">
           <span>Owner wallet address</span>
-          <input id="plm-owner-wallet" name="ownerWalletAddress" type="text" placeholder="Connect Photon Wallet to autofill" />
+          <input id="plm-owner-wallet" name="ownerWalletAddress" type="text" placeholder="Connect Photon Wallet to autofill" readonly />
         </label>
         <label class="control-field">
           <span>Node side</span>
           <select id="plm-account-ref" name="accountRef">
             <option value="photon-rln-user">User Node</option>
+            <option value="photon-rln-user-b">User Node B</option>
             <option value="photon-rln-issuer">Issuer Node</option>
           </select>
         </label>
@@ -303,7 +382,7 @@
       <div id="plm-application-status" class="registry-status" aria-live="polite"></div>
     </section>
 
-    <section class="registry-card open-channel-card">
+    <section id="open-channel-card" class="registry-card open-channel-card hidden tab-panel-hidden" data-tab-panel="admin">
       <div class="panel-header">
         <div>
           <h2>Open parallel asset channel</h2>
@@ -317,6 +396,7 @@
           <span>Node side</span>
           <select id="open-account-ref" name="accountRef">
             <option value="photon-rln-user">User Node</option>
+            <option value="photon-rln-user-b">User Node B</option>
             <option value="photon-rln-issuer">Issuer Node</option>
           </select>
         </label>
@@ -359,7 +439,7 @@
           <input id="open-public" name="public" type="checkbox" />
           <span>Public channel</span>
         </label>
-        <div class="toolbar-actions">
+        <div class="toolbar-actions open-channel-actions">
           <button id="prefill-selected-button" class="page-btn action-btn" type="button">Use Selected</button>
           <button id="open-channel-button" class="page-btn action-btn action-btn-primary" type="submit">Open Channel</button>
         </div>
@@ -386,7 +466,7 @@
       <div id="open-channel-status" class="registry-status" aria-live="polite"></div>
     </section>
 
-    <main class="registry-card">
+    <main class="registry-card" data-tab-panel="overview">
       <div class="panel-header">
         <h2>Channel list</h2>
         <span class="registry-status" id="channel-table-status"></span>
@@ -417,7 +497,7 @@
       </div>
     </main>
 
-    <section class="details-grid">
+    <section class="details-grid" data-tab-panel="overview">
       <article class="registry-card detail-card">
         <div class="panel-header">
           <h2 id="detail-title">Channel details</h2>
@@ -542,6 +622,6 @@
     </div>
   </div>
 
-  <script src="/dev-dashboard.js?v=20260328a" defer></script>
+  <script src="/dev-dashboard.js?v=20260329o" defer></script>
 </body>
 </html>

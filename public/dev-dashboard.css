@@ -85,6 +85,10 @@ body::-webkit-scrollbar-thumb:hover,
   display: none;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .wallet-menu-header {
   display: flex;
   justify-content: space-between;
@@ -202,6 +206,41 @@ body::-webkit-scrollbar-thumb:hover,
   margin-bottom: 22px;
 }
 
+.dashboard-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.dashboard-tab {
+  appearance: none;
+  border: 1px solid rgba(125, 196, 255, 0.2);
+  background: rgba(17, 27, 46, 0.92);
+  color: #d9e8ff;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.dashboard-tab:hover {
+  border-color: rgba(247, 147, 26, 0.45);
+  color: #ffffff;
+}
+
+.dashboard-tab.is-active {
+  background: #f7931a;
+  border-color: #f7931a;
+  color: #ffffff;
+  box-shadow: 0 12px 24px rgba(247, 147, 26, 0.18);
+}
+
+.tab-panel-hidden {
+  display: none !important;
+}
+
 .plm-plan-card,
 .plm-application-card,
 .open-channel-card {
@@ -222,6 +261,7 @@ body::-webkit-scrollbar-thumb:hover,
 
 .plm-checklist-grid {
   margin-top: 16px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .checklist-pill {
@@ -293,8 +333,18 @@ body::-webkit-scrollbar-thumb:hover,
   margin-top: 18px;
 }
 
+.plm-funding-grid > .detail-pill {
+  display: flex;
+  flex-direction: column;
+}
+
+.plm-funding-grid > .detail-pill .tiny-muted {
+  min-height: 40px;
+}
+
 .plm-funding-btn {
-  margin-top: 12px;
+  margin-top: auto;
+  padding-top: 12px;
   width: 100%;
   justify-content: center;
 }
@@ -418,6 +468,15 @@ body::-webkit-scrollbar-thumb:hover,
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   align-items: end;
+}
+
+.open-channel-actions {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.open-channel-actions .page-btn {
+  min-height: 44px;
 }
 
 .toggle-field {
@@ -637,6 +696,103 @@ body::-webkit-scrollbar-thumb:hover,
 .tiny-muted {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.wallet-assignment-table select {
+  appearance: none;
+  width: 100%;
+  min-width: 170px;
+  padding: 11px 42px 11px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(125, 196, 255, 0.22);
+  background:
+    linear-gradient(180deg, rgba(22, 33, 55, 0.98) 0%, rgba(12, 20, 35, 0.98) 100%);
+  background-image:
+    linear-gradient(180deg, rgba(22, 33, 55, 0.98) 0%, rgba(12, 20, 35, 0.98) 100%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath fill='%23f7931a' d='M3.1 4.85a.75.75 0 0 1 1.06 0L7 7.68l2.84-2.83a.75.75 0 1 1 1.06 1.06L7.53 9.27a.75.75 0 0 1-1.06 0L3.1 5.91a.75.75 0 0 1 0-1.06Z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat, no-repeat;
+  background-position: center, right 14px center;
+  background-size: auto, 14px 14px;
+  color: #f4f8ff;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.wallet-assignment-table select:hover {
+  border-color: rgba(247, 147, 26, 0.42);
+}
+
+.wallet-assignment-table select:focus {
+  outline: none;
+  border-color: rgba(247, 147, 26, 0.78);
+  box-shadow: 0 0 0 3px rgba(247, 147, 26, 0.16);
+}
+
+.wallet-assignment-table select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.wallet-assignment-table select option {
+  background: #101827;
+  color: #f4f8ff;
+}
+
+.wallet-assignment-filter-field {
+  min-width: 180px;
+}
+
+.wallet-assignment-card .plm-top-actions {
+  align-items: end;
+}
+
+.wallet-assignment-card .plm-top-actions .page-btn {
+  min-height: 46px;
+}
+
+.wallet-assignment-force-field {
+  min-height: 46px;
+  padding-bottom: 3px;
+  white-space: nowrap;
+}
+
+.wallet-admin-card .toolbar-actions {
+  justify-content: flex-start;
+}
+
+.wallet-assignment-table .wallet-key-cell {
+  max-width: 340px;
+}
+
+.wallet-assignment-table .wallet-key-cell code,
+.wallet-assignment-table .wallet-address-cell code {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wallet-assignment-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.wallet-assignment-actions .page-btn {
+  white-space: nowrap;
+}
+
+.wallet-assignment-apply-dirty {
+  background: #dc2626;
+  border-color: #dc2626;
+  box-shadow: 0 12px 24px rgba(220, 38, 38, 0.2);
+}
+
+.wallet-assignment-apply-dirty:hover {
+  background: #ef4444;
+  border-color: #ef4444;
 }
 
 @media (max-width: 1100px) {

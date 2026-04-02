@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RGB Issuance to Primary Channel Bootstrap</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08111f;
+      --panel: #0d1929;
+      --border: #1f3250;
+      --text: #e8f1ff;
+      --muted: #8ea7c4;
+      --accent: #71d7ff;
+      --warn: #f59e0b;
+      --good: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; background: radial-gradient(circle at top, rgba(113,215,255,.12), transparent 26%), linear-gradient(180deg, #08111f 0%, #0a1426 100%); color: var(--text); line-height: 1.65; }
+    .wrap { width: min(1080px, calc(100vw - 32px)); margin: 0 auto; padding: 40px 0 64px; }
+    .hero, .card { background: rgba(13, 25, 41, 0.94); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28); }
+    .hero { padding: 28px 30px; margin-bottom: 18px; }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0 0 10px; font-size: 34px; line-height: 1.15; }
+    h2 { margin: 0 0 12px; font-size: 22px; }
+    h3 { margin: 20px 0 8px; font-size: 17px; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 20px; }
+    .mini { padding: 14px 16px; border-radius: 14px; border: 1px solid #284066; background: #0a1424; }
+    .mini strong { display: block; margin-bottom: 6px; color: var(--text); }
+    .card { padding: 24px 26px; margin-bottom: 16px; }
+    ul, ol { margin: 10px 0 0 22px; color: var(--muted); }
+    li { margin: 6px 0; }
+    code { font-family: "Roboto Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.94em; color: #c9ebff; background: #091120; padding: 2px 6px; border-radius: 6px; }
+    .flow { padding: 14px 16px; border: 1px solid #26415f; background: #091320; border-radius: 14px; font-family: "Roboto Mono", monospace; white-space: pre-wrap; color: #d4ecff; overflow-x: auto; }
+    .note, .warn, .ok { padding: 12px 14px; border-radius: 12px; margin: 14px 0; }
+    .note { border: 1px solid #31517a; background: #0a1627; }
+    .warn { border: 1px solid #6a4a16; background: #1b1407; color: #fcd34d; }
+    .ok { border: 1px solid #1e5b39; background: #0b1b13; color: #9ee6b8; }
+    .stage-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+    .stage-table th, .stage-table td { border: 1px solid #284066; padding: 10px 12px; vertical-align: top; text-align: left; }
+    .stage-table th { background: #0b1627; color: var(--text); }
+    .tag { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .03em; border: 1px solid #32557d; background: #0a1628; color: var(--accent); }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <p class="eyebrow">PhotonBolt Spec</p>
+      <h1>RGB Issuance to Primary Channel Bootstrap</h1>
+      <p>This document defines the product and backend workflow for issuing a new RGB asset and, optionally, bootstrapping the first RGB Lightning channel for that asset. It is the design contract for board task <code>PHO-029</code>.</p>
+      <div class="grid">
+        <div class="mini"><strong>Registry-only</strong><span>An asset exists, is listed in Asset Registry, and can be imported, but has no guaranteed Lightning path yet.</span></div>
+        <div class="mini"><strong>Lightning-ready</strong><span>An asset exists, has funded channel liquidity, and has at least one usable primary RGB Lightning channel.</span></div>
+        <div class="mini"><strong>Primary channel</strong><span>The first RGB Lightning channel opened for a new asset so the asset can move off-chain immediately after issuance.</span></div>
+      </div>
+    </section>
+    <section class="card"><h2>1. Problem Statement</h2><p>Today, RGB asset issuance and RGB Lightning liquidity are separate. A user can issue an asset and have it appear in Asset Registry while the same asset is still unusable for Lightning because no funded channel exists yet.</p><p>That creates product ambiguity. Users see a newly issued asset and assume instant transfer is available, but the asset may still be in a registry-only state. The missing piece is a clear workflow that links issuance, liquidity reservation, BTC channel funding, channel opening, and post-issuance readiness status.</p><div class="warn">Registry visibility and Lightning usability must be treated as separate states. An asset can be real and public without being Lightning-ready.</div></section>
+    <section class="card"><h2>2. Target User Flow</h2><ol><li>User opens <code>Issue Asset</code> in the wallet.</li><li>User enters name, ticker, precision, and total supply.</li><li>User chooses whether to bootstrap Lightning liquidity now.</li><li>If yes, user chooses:<ul><li>percentage of issued supply reserved for channel liquidity</li><li>BTC amount to commit to the channel</li><li>whether BTC funding happens during issuance or after issuance</li></ul></li><li>Backend issues the asset.</li><li>Backend stores issuance state and liquidity plan.</li><li>Backend lists the asset in Asset Registry.</li><li>If bootstrap was requested and prerequisites are met, backend creates the first RGB Lightning channel.</li><li>Wallet shows the asset as either <span class="tag">Registry-only</span> or <span class="tag">Lightning-ready</span>.</li></ol></section>
+    <section class="card"><h2>3. States and Definitions</h2><table class="stage-table"><thead><tr><th>State</th><th>Meaning</th><th>User-visible meaning</th></tr></thead><tbody><tr><td><code>ISSUING</code></td><td>Backend is minting the asset and recording issuance metadata.</td><td>Asset creation in progress.</td></tr><tr><td><code>ISSUED_REGISTRY_ONLY</code></td><td>Asset exists and is registered, but no usable Lightning channel exists.</td><td>Asset can be imported, but instant transfers are not guaranteed.</td></tr><tr><td><code>WAITING_BTC_CHANNEL_FUNDING</code></td><td>Asset supply is minted, but requested channel bootstrap cannot start until BTC funding arrives.</td><td>More Bitcoin is needed before the first channel can be opened.</td></tr><tr><td><code>BOOTSTRAPPING_CHANNEL</code></td><td>Backend is moving reserved asset liquidity and opening the primary RGB Lightning channel.</td><td>Lightning setup in progress.</td></tr><tr><td><code>LIGHTNING_READY</code></td><td>At least one usable primary RGB Lightning channel exists for the asset.</td><td>Asset is ready for off-chain Lightning use.</td></tr><tr><td><code>BOOTSTRAP_FAILED</code></td><td>Issuance succeeded, but channel bootstrap failed or only partially completed.</td><td>Asset exists, but Lightning setup needs retry or manual recovery.</td></tr></tbody></table></section>
+    <section class="card"><h2>4. Core Product Rules</h2><ul><li>The full issued supply is minted into the requesting user wallet first.</li><li>Any portion reserved for Lightning liquidity is a separate post-issuance reservation, not a hidden issuance diversion.</li><li>Asset Registry listing should happen as soon as issuance succeeds, even if Lightning bootstrap is still pending.</li><li>The wallet must clearly show that registry listing does not automatically mean Lightning readiness.</li><li>Primary channel bootstrap is optional. A user must be able to issue an asset without opening a channel immediately.</li><li>BTC funding and RGB liquidity planning must be validated before bootstrap begins.</li></ul></section>
+    <section class="card"><h2>5. Liquidity Planning Rules</h2><h3>Reserved RGB Amount</h3><p>The issuer can choose a percentage of total supply to reserve for channel liquidity. The backend converts that percentage into an exact reserved asset amount.</p><ul><li>If total supply is <code>1,000,000</code> and liquidity percentage is <code>10%</code>, reserve <code>100,000</code> units.</li><li>The remainder stays in the issuer wallet as regular user-owned balance.</li></ul><h3>BTC Channel Funding</h3><p>RGB Lightning channels still require Bitcoin funding. The user must choose or confirm the BTC amount to commit for the primary channel.</p><ul><li><strong>Fund now:</strong> BTC is supplied during issuance workflow.</li><li><strong>Fund later:</strong> issuance completes first and the channel stays in waiting state until BTC arrives.</li></ul><div class="note">The exact minimum BTC requirement is a backend-calculated readiness value and must be shown in the wallet before final confirmation.</div></section>
+    <section class="card"><h2>6. Backend Workflow Contract</h2><div class="flow">1. Validate issuance request
+2. Validate optional channel bootstrap settings
+3. Issue RGB asset into requesting user wallet
+4. Record issuance row with liquidity plan and lifecycle status
+5. Insert/update Asset Registry row
+6. If bootstrap not requested: mark ISSUED_REGISTRY_ONLY
+7. If bootstrap requested but BTC missing: mark WAITING_BTC_CHANNEL_FUNDING
+8. If bootstrap requested and ready:
+   a. reserve configured RGB amount
+   b. allocate BTC channel funding
+   c. open primary RGB Lightning channel
+   d. verify channel ready/usable
+   e. mark LIGHTNING_READY
+9. On failure after issuance: mark BOOTSTRAP_FAILED and preserve full audit trail</div></section>
+    <section class="card"><h2>7. Failure Handling Rules</h2><ul><li>If issuance fails, nothing is registered.</li><li>If issuance succeeds and registry insertion succeeds, the asset remains valid even if channel creation fails later.</li><li>If channel bootstrap fails, do not delete the asset. Keep it registry-visible and show <code>BOOTSTRAP_FAILED</code>.</li><li>Reserved liquidity and BTC funding state must remain auditable for retry or manual repair.</li><li>The wallet must not display <code>Lightning-ready</code> until the channel is confirmed ready and usable.</li></ul></section>
+    <section class="card"><h2>8. Wallet Requirements</h2><ul><li>Add a <code>Bootstrap Lightning liquidity</code> toggle to the issuance form.</li><li>Add a percentage field or slider for reserved RGB liquidity.</li><li>Add BTC channel funding amount input with backend readiness hint.</li><li>Support <code>fund now</code> and <code>fund later</code> modes.</li><li>Show the post-issuance state:<ul><li>registry-only</li><li>waiting for BTC funding</li><li>bootstrapping</li><li>Lightning-ready</li><li>bootstrap failed</li></ul></li></ul></section>
+    <section class="card"><h2>9. Data Model Changes</h2><p>The issuance workflow table should persist at least:</p><ul><li><code>liquidity_percentage</code></li><li><code>reserved_asset_amount</code></li><li><code>requested_channel_btc_sat</code></li><li><code>channel_bootstrap_mode</code> (<code>none</code>, <code>fund_now</code>, <code>fund_later</code>)</li><li><code>lifecycle_status</code></li><li><code>primary_channel_id</code> if created</li><li><code>last_error</code> for retry and support visibility</li></ul></section>
+    <section class="card"><h2>10. Implementation Sequence</h2><ol><li>Persist liquidity plan and lifecycle status.</li><li>Add wallet issuance controls.</li><li>Add BTC funding readiness and mode selection.</li><li>Implement primary RGB Lightning channel bootstrap orchestration.</li><li>Add post-issuance readiness UI.</li></ol><div class="ok">This document is the gating spec for implementation tasks <code>PHO-027</code>, <code>PHO-028</code>, <code>PHO-030</code>, and <code>PHO-031</code>.</div><p><a href="/board.html">Back to the project board</a></p></section>
+  </div>
+</body>
+</html>

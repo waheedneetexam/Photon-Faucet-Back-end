@@ -34,8 +34,16 @@ body {
   display: flex;
   justify-content: space-between;
   gap: 24px;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 22px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .eyebrow {
@@ -53,6 +61,54 @@ h1 {
 
 .search-wrap {
   min-width: 320px;
+}
+
+.admin-panel {
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.admin-status {
+  min-height: 20px;
+  font-size: 0.88rem;
+  color: var(--muted);
+  text-align: right;
+  max-width: 420px;
+}
+
+.admin-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.toolbar-btn {
+  border: 1px solid rgba(125, 196, 255, 0.28);
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.84rem;
+}
+
+.toolbar-btn:hover {
+  color: var(--accent);
+  border-color: rgba(125, 196, 255, 0.5);
+}
+
+.toolbar-btn.secondary {
+  opacity: 0.82;
+}
+
+.toolbar-btn:disabled,
+.archive-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .search-wrap input {
@@ -109,7 +165,8 @@ h1 {
 }
 
 .copy-btn,
-.import-btn {
+.import-btn,
+.archive-btn {
   border: none;
   border-radius: 999px;
   padding: 8px 12px;
@@ -120,7 +177,8 @@ h1 {
 }
 
 .copy-btn:hover,
-.import-btn:hover {
+.import-btn:hover,
+.archive-btn:hover {
   color: var(--accent);
   border-color: rgba(125, 196, 255, 0.5);
 }
@@ -133,6 +191,14 @@ h1 {
 
 .copy-btn.copied,
 .import-btn.copied {
+  color: #7ef0a4;
+}
+
+.archive-btn.archive {
+  color: #f6c17e;
+}
+
+.archive-btn.unarchive {
   color: #7ef0a4;
 }
 
@@ -176,4 +242,28 @@ h1 {
   justify-content: center;
   min-width: 78px;
   text-decoration: none;
+}
+
+@media (max-width: 768px) {
+  .registry-shell {
+    padding: 26px 16px;
+  }
+
+  .registry-header {
+    flex-direction: column;
+  }
+
+  .header-actions,
+  .admin-panel,
+  .admin-buttons,
+  .search-wrap {
+    width: 100%;
+    align-items: stretch;
+    justify-content: stretch;
+  }
+
+  .admin-status {
+    text-align: left;
+    max-width: none;
+  }
 }

@@ -1,0 +1,71 @@
+.node-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.node-card {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 18px;
+  padding: 1rem;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92) 0%, rgba(17, 24, 39, 0.96) 100%);
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.22);
+}
+
+.node-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.9rem;
+}
+
+.node-card-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.node-card-meta {
+  font-size: 0.82rem;
+  color: #94a3b8;
+}
+
+.node-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.node-card-actions .page-btn {
+  min-width: 120px;
+}
+
+.node-card-status {
+  margin-top: 0.9rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+  min-height: 2.6em;
+}
+
+.node-card-status.is-error {
+  color: #fca5a5;
+}
+
+.node-card-status.is-success {
+  color: #86efac;
+}
+
+.node-card-status code {
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .node-card-actions {
+    flex-direction: column;
+  }
+
+  .node-card-actions .page-btn {
+    width: 100%;
+  }
+}

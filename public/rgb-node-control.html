@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt RGB Node Control</title>
+  <meta name="description" content="Admin controls for restarting PhotonBolt RGB nodes and refreshing transfers." />
+  <link rel="stylesheet" href="/asset-registry.css?v=20260328l" />
+  <link rel="stylesheet" href="/rgb-node-control.css?v=20260401a" />
+</head>
+<body>
+  <div class="registry-shell">
+    <header class="registry-header">
+      <div>
+        <p class="eyebrow">PhotonBolt Admin</p>
+        <h1>RGB Node Control</h1>
+        <p class="registry-status">Restart RGB nodes, refresh transfers, and recover stale settlement state.</p>
+      </div>
+      <div class="toolbar-actions">
+        <a class="page-btn page-link-btn" href="/">Faucet</a>
+        <a class="page-btn page-link-btn" href="/dev-dashboard.html">Dev Dashboard</a>
+        <a class="page-btn page-link-btn" href="/rgb-faucet.html">RGB Faucet</a>
+      </div>
+    </header>
+
+    <section class="registry-card hero-card">
+      <div class="toolbar-row">
+        <div>
+          <h2>Admin Session</h2>
+          <p class="registry-status form-note">
+            This page reuses the admin session token from Dev Dashboard. Authenticate there first with the configured admin wallet.
+          </p>
+        </div>
+        <div class="toolbar-actions">
+          <a class="page-btn action-btn" href="/dev-dashboard.html">Open Dev Dashboard</a>
+          <button id="reload-session-button" class="page-btn action-btn" type="button">Reload Session</button>
+        </div>
+      </div>
+      <div id="auth-status" class="registry-status" aria-live="polite">Checking admin session...</div>
+    </section>
+
+    <section class="registry-card">
+      <div class="panel-header">
+        <div>
+          <h2>Node Actions</h2>
+          <p class="registry-status form-note">
+            Use <code>Restart + Refresh</code> for stuck RGB nodes. Restart actions now attempt an automatic unlock before refresh. If a node uses a different password, enter it on the card before restarting.
+          </p>
+        </div>
+      </div>
+      <div id="controls-grid" class="node-controls-grid"></div>
+    </section>
+  </div>
+
+  <script src="/rgb-node-control.js?v=20260401a" defer></script>
+</body>
+</html>

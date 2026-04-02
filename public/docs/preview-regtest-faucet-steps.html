@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PhotonBolt Preview: Bitcoin RegTest Faucet Steps</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --card:#0f1c30; --muted:#9fb1c9; --line:#243550; --gold:#fbbf24; --text:#ecf4ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: Inter, system-ui, sans-serif; background:linear-gradient(180deg,#08111f,#0d1728); color:var(--text); }
+    main { max-width: 980px; margin: 0 auto; padding: 48px 20px 72px; }
+    h1,h2 { margin: 0 0 12px; }
+    p { color: var(--muted); line-height: 1.7; }
+    .hero,.card { background: rgba(15,28,48,.88); border:1px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.24); }
+    .hero { margin-bottom: 20px; }
+    .pill { display:inline-block; padding: 8px 12px; border-radius: 999px; background: rgba(251,191,36,.12); color: var(--gold); font-weight: 700; margin-bottom: 16px; }
+    .grid { display:grid; gap:16px; }
+    .step-title { color: var(--gold); font-weight: 700; margin-bottom: 8px; }
+    code { background:#08111f; border:1px solid var(--line); border-radius:8px; padding:2px 6px; color:#ffd978; }
+    a { color: #ffd978; text-decoration: none; }
+    ul { color: var(--muted); line-height: 1.7; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="pill">Preview Integration Guide</div>
+      <h1>Bitcoin RegTest Faucet Steps</h1>
+      <p>Use these steps from <code>photonbolt.xyz/preview</code> to fund Photon Wallet with RegTest BTC from the live PhotonBolt faucet at <a href="https://faucet.photonbolt.xyz/" target="_blank" rel="noopener noreferrer">faucet.photonbolt.xyz</a>.</p>
+    </section>
+    <section class="grid">
+      <div class="card"><div class="step-title">1. Connect Photon Wallet on the preview page</div><p>Use the <code>Connect Photon Wallet</code> button in the preview header. This exposes the currently active Photon wallet address to the page so you can copy the right RegTest address.</p></div>
+      <div class="card"><div class="step-title">2. Copy the RegTest address</div><p>From the preview faucet section, copy the connected wallet address. This must be the same wallet you plan to use for UTXO creation, RGB issuance, and Lightning testing.</p></div>
+      <div class="card"><div class="step-title">3. Open the live RegTest faucet</div><p>Open <a href="https://faucet.photonbolt.xyz/" target="_blank" rel="noopener noreferrer">https://faucet.photonbolt.xyz/</a> and paste the copied address into the Bitcoin faucet form.</p></div>
+      <div class="card"><div class="step-title">4. Request BTC and return to the wallet</div><p>Submit the request, then return to Photon Wallet. Refresh the balance or reopen the wallet popup so the new RegTest BTC appears.</p></div>
+      <div class="card"><div class="step-title">5. Use the funded wallet for RGB actions</div><p>After BTC arrives you can create RGB UTXOs, issue assets, open invoices, and prepare for RGB Lightning channel flows.</p><ul><li>RGB issuance requires BTC and confirmed UTXOs.</li><li>First-time RGB flows often need a prepared RGB UTXO before invoice creation or receiving works smoothly.</li></ul></div>
+    </section>
+  </main>
+</body>
+</html>

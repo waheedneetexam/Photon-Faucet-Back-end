@@ -86,6 +86,21 @@ const plmProgressCount = document.getElementById('plm-progress-count');
 const plmProgressFill = document.getElementById('plm-progress-fill');
 const plmApplicationStatus = document.getElementById('plm-application-status');
 const plmStepper = document.getElementById('plm-stepper');
+const dashboardTabButtons = Array.from(document.querySelectorAll('[data-dashboard-tab]'));
+const dashboardTabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+const walletAssignmentRefreshButton = document.getElementById('wallet-assignment-refresh-button');
+const walletAssignmentStatus = document.getElementById('wallet-assignment-status');
+const walletAssignmentBody = document.getElementById('wallet-assignment-body');
+const walletAssignmentFilterInput = document.getElementById('wallet-assignment-filter-input');
+const walletAssignmentFilterType = document.getElementById('wallet-assignment-filter-type');
+const walletAssignmentForceToggle = document.getElementById('wallet-assignment-force-toggle');
+const adminWalletCard = document.getElementById('admin-wallet-card');
+const walletAssignmentCard = document.getElementById('wallet-assignment-card');
+const adminOperatorTab = document.getElementById('admin-operator-tab');
+const adminAuthButton = document.getElementById('admin-auth-button');
+const adminLogoutButton = document.getElementById('admin-logout-button');
+const adminAuthStatus = document.getElementById('admin-auth-status');
+const openChannelCard = document.getElementById('open-channel-card');
 
 const metricChannels = document.getElementById('metric-channels');
 const metricAsset = document.getElementById('metric-asset');
@@ -104,6 +119,11 @@ let walletMenuOpen = false;
 let walletMenuRefreshTimer = null;
 let plmState = null;
 let assetPickerTarget = 'open';
+let walletAssignments = [];
+let registeredRgbNodes = [];
+let adminSessionToken = null;
+let activeDashboardTab = 'overview';
+let pendingWalletAssignments = new Map();
 
 const PHO_ASSET_CANDIDATES = [
   'pho',
@@ -121,6 +141,8 @@ const LIGHT_ASSET_CANDIDATES = [
 ];
 
 const PLM_STATE_KEY = 'photonbolt-dev-dashboard-plm-state-v1';
+const ADMIN_SESSION_STORAGE_KEY = 'photonbolt-dev-admin-session-v1';
+const ADMIN_WALLET_ADDRESS = 'bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95';
 
 function shorten(value, start = 10, end = 8) {
   if (!value || value.length <= start + end + 3) return value || '-';
@@ -160,9 +182,384 @@ function statusClass(status) {
 }
 
 function accountRefLabel(accountRef) {
+  const registeredNode = registeredRgbNodes.find((node) => node.accountRef === accountRef);
+  if (registeredNode?.label) return registeredNode.label;
   if (accountRef === 'photon-rln-user') return 'User Node';
+  if (accountRef === 'photon-rln-user-b') return 'User Node B';
   if (accountRef === 'photon-rln-issuer') return 'Issuer Node';
   return accountRef || '-';
+}
+
+function renderWalletAssignmentSelectOptions(selectedAccountRef) {
+  const nodes = registeredRgbNodes.length
+    ? registeredRgbNodes
+    : [
+        { accountRef: 'photon-rln-user', label: 'User Node' },
+        { accountRef: 'photon-rln-user-b', label: 'User Node B' },
+        { accountRef: 'photon-rln-issuer', label: 'Issuer Node' },
+      ];
+
+  return nodes
+    .map((node) => `<option value="${node.accountRef}" ${selectedAccountRef === node.accountRef ? 'selected' : ''}>${node.label}</option>`)
+    .join('');
+}
+
+function setActiveDashboardTab(nextTab) {
+  const resolvedTab = nextTab || 'overview';
+  const adminVisible = adminOperatorTab && !adminOperatorTab.classList.contains('hidden');
+  activeDashboardTab = resolvedTab === 'admin' && !adminVisible ? 'overview' : resolvedTab;
+
+  dashboardTabButtons.forEach((button) => {
+    button.classList.toggle('is-active', button.dataset.dashboardTab === activeDashboardTab);
+  });
+
+  dashboardTabPanels.forEach((panel) => {
+    panel.classList.toggle('tab-panel-hidden', panel.dataset.tabPanel !== activeDashboardTab);
+  });
+}
+
+function loadStoredAdminSessionToken() {
+  try {
+    return window.localStorage?.getItem(ADMIN_SESSION_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function persistAdminSessionToken(token) {
+  adminSessionToken = token || null;
+  try {
+    if (!window.localStorage) return;
+    if (token) {
+      window.localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, token);
+    } else {
+      window.localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function getConnectedWalletAddress() {
+  return walletMenuAddress?.textContent?.trim() || '';
+}
+
+function isAdminWalletAddress(address) {
+  return typeof address === 'string' && address.trim() === ADMIN_WALLET_ADDRESS;
+}
+
+function setAdminAuthStatus(message) {
+  if (adminAuthStatus) {
+    adminAuthStatus.textContent = message;
+  }
+}
+
+function updateAdminUi() {
+  const connectedAddress = getConnectedWalletAddress();
+  const matchesAdminWallet = isAdminWalletAddress(connectedAddress);
+  const isAuthenticated = Boolean(adminSessionToken) && matchesAdminWallet;
+  const showAdminTab = matchesAdminWallet || isAuthenticated;
+
+  if (adminOperatorTab) {
+    adminOperatorTab.classList.toggle('hidden', !showAdminTab);
+  }
+
+  if (adminWalletCard) {
+    adminWalletCard.classList.toggle('hidden', !matchesAdminWallet);
+  }
+
+  if (walletAssignmentCard) {
+    walletAssignmentCard.classList.toggle('hidden', !isAuthenticated);
+  }
+
+  if (openChannelCard) {
+    openChannelCard.classList.toggle('hidden', !isAuthenticated);
+  }
+
+  if (openChannelButton) {
+    openChannelButton.disabled = !isAuthenticated;
+  }
+
+  if (adminAuthButton) {
+    adminAuthButton.disabled = !matchesAdminWallet;
+  }
+
+  if (adminLogoutButton) {
+    adminLogoutButton.disabled = !isAuthenticated;
+  }
+
+  if (!matchesAdminWallet) {
+    setAdminAuthStatus('Connect the configured admin wallet to unlock sensitive controls.');
+    if (activeDashboardTab === 'admin') {
+      setActiveDashboardTab('overview');
+    } else {
+      setActiveDashboardTab(activeDashboardTab);
+    }
+    return;
+  }
+
+  if (isAuthenticated) {
+    setAdminAuthStatus('Admin wallet authenticated. Sensitive controls are unlocked.');
+    setActiveDashboardTab(activeDashboardTab);
+    return;
+  }
+
+  setAdminAuthStatus('Admin wallet detected. Sign the challenge to unlock wallet assignment controls.');
+  setActiveDashboardTab(activeDashboardTab);
+}
+
+function buildAdminHeaders(extraHeaders = {}) {
+  return adminSessionToken
+    ? { ...extraHeaders, 'x-photon-admin-token': adminSessionToken }
+    : extraHeaders;
+}
+
+function setWalletAssignmentStatus(message) {
+  if (walletAssignmentStatus) {
+    walletAssignmentStatus.textContent = message;
+  }
+}
+
+function formatWalletAssignmentDate(value) {
+  if (!value) return 'Never';
+  return formatDateTime(value);
+}
+
+function getFilteredWalletAssignments() {
+  const query = walletAssignmentFilterInput?.value?.trim().toLowerCase() || '';
+  const type = walletAssignmentFilterType?.value || 'all';
+
+  return walletAssignments.filter((wallet) => {
+    const isExtension = wallet.walletKey.startsWith('extension-');
+    const isAssigned = Boolean(wallet.rgbAccountRef);
+    const isDevTest = !isExtension;
+
+    if (type === 'extension' && !isExtension) return false;
+    if (type === 'assigned' && !isAssigned) return false;
+    if (type === 'unassigned' && isAssigned) return false;
+    if (type === 'devtest' && !isDevTest) return false;
+
+    if (!query) return true;
+
+    const haystack = [
+      wallet.walletKey,
+      wallet.displayName,
+      wallet.mainBtcAddress,
+      wallet.utxoFundingAddress,
+      wallet.rgbAccountRef,
+      wallet.effectiveAccountRef,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes(query);
+  });
+}
+
+function renderWalletAssignments() {
+  if (!walletAssignmentBody) return;
+
+  const visibleWallets = getFilteredWalletAssignments();
+
+  if (!visibleWallets.length) {
+    walletAssignmentBody.innerHTML = '<tr class="empty-row"><td colspan="5">No regtest wallets found yet.</td></tr>';
+    return;
+  }
+
+  walletAssignmentBody.innerHTML = visibleWallets
+    .map((wallet) => {
+      const pendingAccountRef = pendingWalletAssignments.get(wallet.walletKey) || wallet.effectiveAccountRef;
+      const isDirty = pendingAccountRef !== wallet.effectiveAccountRef;
+      return `
+      <tr data-wallet-key="${wallet.walletKey}">
+        <td class="wallet-key-cell">
+          <code title="${wallet.walletKey}">${wallet.walletKey}</code>
+          ${wallet.isOwnerWallet ? '<div class="tiny-muted">Issuer owner wallet</div>' : ''}
+        </td>
+        <td class="wallet-address-cell">
+          ${wallet.mainBtcAddress ? `<code title="${wallet.mainBtcAddress}">${shorten(wallet.mainBtcAddress, 8, 4)}</code>` : '<span class="tiny-muted">Not synced yet</span>'}
+        </td>
+        <td>
+          <strong>${accountRefLabel(wallet.effectiveAccountRef)}</strong>
+          <div class="tiny-muted">${isDirty ? `Pending change to ${accountRefLabel(pendingAccountRef)}` : (wallet.rgbAccountRef || 'No explicit assignment yet')}</div>
+        </td>
+        <td>${formatWalletAssignmentDate(wallet.lastSeenAt)}</td>
+        <td>
+          <div class="wallet-assignment-actions">
+            <select class="wallet-assignment-select" data-wallet-key="${wallet.walletKey}" ${wallet.canAssign ? '' : 'disabled'}>
+              ${renderWalletAssignmentSelectOptions(pendingAccountRef)}
+            </select>
+            <button class="page-btn action-btn wallet-assignment-apply ${isDirty ? 'wallet-assignment-apply-dirty' : ''}" type="button" data-wallet-key="${wallet.walletKey}" ${wallet.canAssign ? '' : 'disabled'}>
+              Assign
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+    })
+    .join('');
+}
+
+async function loadWalletAssignments({ silent = false } = {}) {
+  if (!adminSessionToken) {
+    walletAssignments = [];
+    registeredRgbNodes = [];
+    pendingWalletAssignments = new Map();
+    renderWalletAssignments();
+    if (!silent) {
+      setWalletAssignmentStatus('Admin authentication required.');
+    }
+    return;
+  }
+
+  if (!silent) {
+    setWalletAssignmentStatus('Loading wallet assignments...');
+  }
+
+  try {
+    const response = await fetch('/api/rgb/wallet-assignments', {
+      headers: buildAdminHeaders(),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      if (response.status === 403) {
+        persistAdminSessionToken(null);
+        updateAdminUi();
+      }
+      throw new Error(payload.error || 'Failed to load wallet assignments.');
+    }
+
+    walletAssignments = Array.isArray(payload.wallets) ? payload.wallets : [];
+    registeredRgbNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    pendingWalletAssignments = new Map();
+    renderWalletAssignments();
+    const visibleCount = getFilteredWalletAssignments().length;
+    setWalletAssignmentStatus(`Loaded ${walletAssignments.length} wallet assignment${walletAssignments.length === 1 ? '' : 's'}${visibleCount !== walletAssignments.length ? ` • showing ${visibleCount}` : ''}.`);
+  } catch (error) {
+    walletAssignments = [];
+    registeredRgbNodes = [];
+    pendingWalletAssignments = new Map();
+    renderWalletAssignments();
+    setWalletAssignmentStatus(error.message || 'Failed to load wallet assignments.');
+  }
+}
+
+async function assignWalletToNode(walletKey, accountRef) {
+  if (!adminSessionToken) {
+    throw new Error('Admin authentication required.');
+  }
+
+  const forceAssign = Boolean(walletAssignmentForceToggle?.checked);
+  setWalletAssignmentStatus(`${forceAssign ? 'Force assigning' : 'Assigning'} ${walletKey} to ${accountRefLabel(accountRef)}...`);
+
+  const response = await fetch('/api/rgb/wallet-assign', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAdminHeaders(),
+    },
+    body: JSON.stringify({ walletKey, accountRef, forceAssign }),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    if (response.status === 403) {
+      persistAdminSessionToken(null);
+      updateAdminUi();
+    }
+    if (response.status === 409) {
+      throw new Error(`${payload.error || 'Wallet reassignment blocked.'} Tick Force Assign to override if you accept the loss risk.`);
+    }
+    throw new Error(payload.error || 'Failed to assign wallet.');
+  }
+
+  const updatedWallet = payload.wallet || null;
+  if (updatedWallet) {
+    walletAssignments = walletAssignments.map((wallet) =>
+      wallet.walletKey === updatedWallet.walletKey ? updatedWallet : wallet
+    );
+  }
+
+  renderWalletAssignments();
+  setWalletAssignmentStatus(payload.message || `${walletKey} assigned to ${accountRefLabel(accountRef)}.`);
+  await loadDashboard();
+}
+
+async function unlockAdminControls() {
+  const photon = getPhotonProvider();
+  if (!photon) {
+    throw new Error('Photon Wallet extension is not installed in this browser.');
+  }
+
+  const address = getConnectedWalletAddress();
+  if (!isAdminWalletAddress(address)) {
+    throw new Error('Connect the configured admin wallet first.');
+  }
+
+  setAdminAuthStatus('Requesting admin challenge...');
+  const challengeResponse = await fetch(`/api/admin/auth/challenge?address=${encodeURIComponent(address)}`);
+  const challengePayload = await challengeResponse.json();
+  if (!challengeResponse.ok || !challengePayload.ok) {
+    throw new Error(challengePayload.error || 'Failed to request admin challenge.');
+  }
+
+  setAdminAuthStatus('Sign the admin challenge in Photon Wallet...');
+  const signResult = typeof photon._sendRequest === 'function'
+    ? await photon._sendRequest('signMessage', { message: challengePayload.message })
+    : { signature: await photon.signMessage(challengePayload.message), address };
+  const signedAddress = typeof signResult?.address === 'string' ? signResult.address.trim() : address;
+  const signature = typeof signResult?.signature === 'string' ? signResult.signature.trim() : '';
+
+  if (!signature) {
+    throw new Error('Photon Wallet did not return an admin signature.');
+  }
+
+  if (!isAdminWalletAddress(signedAddress)) {
+    throw new Error(`Photon Wallet signed with ${signedAddress || 'an unknown address'}, not the configured admin wallet.`);
+  }
+
+  setAdminAuthStatus('Verifying admin signature...');
+  const verifyResponse = await fetch('/api/admin/auth/verify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      challengeId: challengePayload.challengeId,
+      address: signedAddress,
+      signature,
+    }),
+  });
+  const verifyPayload = await verifyResponse.json();
+  if (!verifyResponse.ok || !verifyPayload.ok) {
+    throw new Error(verifyPayload.error || 'Failed to verify admin signature.');
+  }
+
+  persistAdminSessionToken(verifyPayload.token);
+  updateAdminUi();
+  await loadWalletAssignments();
+}
+
+async function lockAdminControls() {
+  if (!adminSessionToken) {
+    updateAdminUi();
+    return;
+  }
+
+  try {
+    await fetch('/api/admin/auth/logout', {
+      method: 'POST',
+      headers: buildAdminHeaders(),
+    });
+  } catch {
+    // ignore logout failures
+  }
+
+  persistAdminSessionToken(null);
+  walletAssignments = [];
+  renderWalletAssignments();
+  updateAdminUi();
+  setWalletAssignmentStatus('Admin controls locked.');
 }
 
 function getPhotonProvider() {
@@ -220,10 +617,13 @@ function updateWalletTrigger(address = '') {
 function setWalletButtonState(isConnected) {
   if (walletConnectButton) {
     walletConnectButton.classList.toggle('wallet-hidden', Boolean(isConnected));
+    walletConnectButton.disabled = false;
+    walletConnectButton.textContent = 'Connect';
   }
   if (walletDisconnectButton) {
     walletDisconnectButton.classList.toggle('wallet-hidden', !isConnected);
     walletDisconnectButton.disabled = !isConnected;
+    walletDisconnectButton.textContent = 'Disconnect';
   }
 }
 
@@ -307,11 +707,15 @@ async function refreshWalletMenu({ announce = false } = {}) {
   const photon = getPhotonProvider();
 
   if (!photon) {
+    persistAdminSessionToken(null);
     updateWalletTrigger('');
     setWalletValues({});
+    syncPlmOwnerWallet('');
     setWalletStatus('Photon Wallet extension is not installed in this browser.');
     if (walletMenuTitle) walletMenuTitle.textContent = 'Photon Wallet';
     setWalletButtonState(false);
+    updateAdminUi();
+    updatePlmWalletRequirementUi();
     return;
   }
 
@@ -320,11 +724,15 @@ async function refreshWalletMenu({ announce = false } = {}) {
     const address = Array.isArray(accounts) ? (accounts[0] || '') : '';
 
     if (!address) {
+      persistAdminSessionToken(null);
       updateWalletTrigger('');
       setWalletValues({});
+      syncPlmOwnerWallet('');
       setWalletStatus('Connect Photon Wallet to view balances.');
       if (walletMenuTitle) walletMenuTitle.textContent = 'Photon Wallet';
       setWalletButtonState(false);
+      updateAdminUi();
+      updatePlmWalletRequirementUi();
       return;
     }
 
@@ -343,7 +751,7 @@ async function refreshWalletMenu({ announce = false } = {}) {
       pho: phoBalance || 'Unavailable',
       light: lightBalance || 'Unavailable',
     });
-    maybeSyncPlmOwnerWallet(address);
+    syncPlmOwnerWallet(address);
     setWalletStatus(
       phoBalance || lightBalance
         ? 'Connected through Photon Wallet.'
@@ -351,14 +759,23 @@ async function refreshWalletMenu({ announce = false } = {}) {
     );
     if (walletMenuTitle) walletMenuTitle.textContent = 'Photon Wallet Connected';
     setWalletButtonState(true);
+    if (!isAdminWalletAddress(address)) {
+      persistAdminSessionToken(null);
+    }
+    updateAdminUi();
+    updatePlmWalletRequirementUi();
     if (announce) {
       console.log('Photon wallet connected:', address, network);
     }
   } catch (error) {
+    persistAdminSessionToken(null);
     updateWalletTrigger('');
     setWalletValues({});
+    syncPlmOwnerWallet('');
     setWalletStatus(error.message || 'Failed to read Photon Wallet state.');
     setWalletButtonState(false);
+    updateAdminUi();
+    updatePlmWalletRequirementUi();
   }
 }
 
@@ -369,12 +786,23 @@ async function connectWalletMenu() {
     return;
   }
 
-  setWalletStatus('Connecting to Photon Wallet...');
+  if (walletConnectButton) {
+    walletConnectButton.disabled = true;
+    walletConnectButton.textContent = 'Connecting...';
+  }
+  setWalletStatus('Requesting connection from Photon Wallet. Approve the connection in the extension popup if prompted.');
   try {
+    setWalletStatus('Waiting for Photon Wallet to return your account and network details...');
     await photon.connect();
     await refreshWalletMenu({ announce: true });
+    setWalletStatus('Photon Wallet connected successfully. Balances and the owner wallet field are now synced.');
   } catch (error) {
     setWalletStatus(error.message || 'Connection failed.');
+  } finally {
+    if (walletConnectButton) {
+      walletConnectButton.disabled = false;
+      walletConnectButton.textContent = 'Connect';
+    }
   }
 }
 
@@ -386,15 +814,27 @@ async function disconnectWalletMenu() {
   }
 
   setWalletStatus('Disconnecting...');
+  if (walletDisconnectButton) {
+    walletDisconnectButton.disabled = true;
+    walletDisconnectButton.textContent = 'Disconnecting...';
+  }
   try {
     await photon.disconnect();
+    persistAdminSessionToken(null);
     updateWalletTrigger('');
     setWalletValues({});
+    syncPlmOwnerWallet('');
     setWalletStatus('Disconnected from Photon Wallet.');
     if (walletMenuTitle) walletMenuTitle.textContent = 'Photon Wallet';
     setWalletButtonState(false);
+    updateAdminUi();
+    updatePlmWalletRequirementUi();
   } catch (error) {
     setWalletStatus(error.message || 'Disconnect failed.');
+    if (walletDisconnectButton) {
+      walletDisconnectButton.disabled = false;
+      walletDisconnectButton.textContent = 'Disconnect';
+    }
   }
 }
 
@@ -404,11 +844,22 @@ function setPlmMessage(message) {
   }
 }
 
-function maybeSyncPlmOwnerWallet(address = '') {
+function syncPlmOwnerWallet(address = '') {
   if (!plmOwnerWallet) return;
-  if (plmOwnerWallet.value.trim()) return;
-  if (!address) return;
-  plmOwnerWallet.value = address;
+  plmOwnerWallet.value = address || '';
+  plmOwnerWallet.placeholder = address
+    ? 'Loaded from connected Photon Wallet'
+    : 'Connect Photon Wallet to autofill';
+}
+
+function updatePlmWalletRequirementUi() {
+  const hasConnectedWallet = Boolean(currentWalletAddress());
+  if (plmApplyButton) {
+    plmApplyButton.disabled = !hasConnectedWallet;
+  }
+  if (!hasConnectedWallet && !plmState) {
+    setPlmMessage('Connect Photon Wallet first. Owner wallet address is always taken from the connected wallet.');
+  }
 }
 
 function safeJsonParse(value) {
@@ -569,7 +1020,7 @@ function useSelectedChannelForPlm() {
 
 function buildPlmApplicationPayload() {
   return {
-    ownerWalletAddress: String(plmOwnerWallet?.value || currentWalletAddress()).trim(),
+    ownerWalletAddress: currentWalletAddress(),
     accountRef: plmAccountRef?.value || 'photon-rln-user',
     peerPubkey: String(plmPeerPubkey?.value || '').trim(),
     rgbAssetId: String(plmAssetId?.value || '').trim(),
@@ -591,6 +1042,11 @@ async function fetchPlmApplicationStatus(id) {
 
 async function submitPlmApplication(event) {
   event.preventDefault();
+  if (!currentWalletAddress()) {
+    setPlmMessage('Connect Photon Wallet first. Owner wallet address comes from the connected wallet.');
+    walletMenuTrigger?.focus();
+    return;
+  }
   if (plmApplyButton) plmApplyButton.disabled = true;
   setPlmMessage('Creating PLM channel application...');
 
@@ -612,7 +1068,7 @@ async function submitPlmApplication(event) {
   } catch (error) {
     setPlmMessage(error.message || 'Unable to create PLM application.');
   } finally {
-    if (plmApplyButton) plmApplyButton.disabled = false;
+    updatePlmWalletRequirementUi();
   }
 }
 
@@ -779,7 +1235,7 @@ function renderAssetSummaries(channels) {
           row.issuerMaxSingle = Math.max(row.issuerMaxSingle, amount);
         }
       }
-      if (node.accountRef === 'photon-rln-user') {
+      if (node.accountRef === 'photon-rln-user' || node.accountRef === 'photon-rln-user-b') {
         if (isReady) {
           row.userLocalTotal += amount;
           row.userMaxSingle = Math.max(row.userMaxSingle, amount);
@@ -1267,7 +1723,9 @@ async function runOpenChannelCheck() {
       capacitySat: String(capacitySat),
       assetAmount: String(assetAmount),
     });
-    const response = await fetch(`/api/rgb/open-channel-check?${params.toString()}`);
+    const response = await fetch(`/api/rgb/open-channel-check?${params.toString()}`, {
+      headers: buildAdminHeaders(),
+    });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
       throw new Error(payload.error || 'Open channel check failed.');
@@ -1351,6 +1809,12 @@ async function submitOpenChannel(event) {
   event.preventDefault();
   if (!openChannelStatus) return;
 
+  if (!adminSessionToken) {
+    openChannelStatus.textContent = 'Admin authentication is required to open a parallel asset channel.';
+    setActiveDashboardTab('admin');
+    return;
+  }
+
   if (!lastOpenChannelCheckPassed) {
     openChannelStatus.textContent = 'Balance check failed or has not completed yet. Fix the form inputs before opening the channel.';
     return;
@@ -1361,7 +1825,7 @@ async function submitOpenChannel(event) {
   try {
     const response = await fetch('/api/rgb/open-channel', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildAdminHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         accountRef: openAccountRef?.value,
         peerPubkey: openPeerPubkey?.value,
@@ -1424,6 +1888,7 @@ async function loadDashboard() {
     dashboardStatus.textContent = `Live snapshot loaded from ${payload.nodeSources.map((source) => source.label).join(' and ')}.`;
     renderAssetSummaries(dashboardData);
     applyFilter();
+    void loadWalletAssignments({ silent: true });
   } catch (error) {
     dashboardStatus.textContent = error.message;
     channelsBody.innerHTML = `<tr class="empty-row"><td colspan="10">${error.message}</td></tr>`;
@@ -1446,6 +1911,28 @@ if (channelSearch) {
 
 if (refreshButton) {
   refreshButton.addEventListener('click', loadDashboard);
+}
+
+if (walletAssignmentRefreshButton) {
+  walletAssignmentRefreshButton.addEventListener('click', async () => {
+    await loadWalletAssignments();
+  });
+}
+
+if (walletAssignmentFilterInput) {
+  walletAssignmentFilterInput.addEventListener('input', () => {
+    renderWalletAssignments();
+    const visibleCount = getFilteredWalletAssignments().length;
+    setWalletAssignmentStatus(`Loaded ${walletAssignments.length} wallet assignment${walletAssignments.length === 1 ? '' : 's'}${visibleCount !== walletAssignments.length ? ` • showing ${visibleCount}` : ''}.`);
+  });
+}
+
+if (walletAssignmentFilterType) {
+  walletAssignmentFilterType.addEventListener('change', () => {
+    renderWalletAssignments();
+    const visibleCount = getFilteredWalletAssignments().length;
+    setWalletAssignmentStatus(`Loaded ${walletAssignments.length} wallet assignment${walletAssignments.length === 1 ? '' : 's'}${visibleCount !== walletAssignments.length ? ` • showing ${visibleCount}` : ''}.`);
+  });
 }
 
 if (prefillSelectedButton) {
@@ -1542,6 +2029,22 @@ if (walletDisconnectButton) {
   });
 }
 
+if (adminAuthButton) {
+  adminAuthButton.addEventListener('click', async () => {
+    try {
+      await unlockAdminControls();
+    } catch (error) {
+      setAdminAuthStatus(error.message || 'Unable to unlock admin controls.');
+    }
+  });
+}
+
+if (adminLogoutButton) {
+  adminLogoutButton.addEventListener('click', async () => {
+    await lockAdminControls();
+  });
+}
+
 if (plmApplicationForm) {
   plmApplicationForm.addEventListener('submit', submitPlmApplication);
 }
@@ -1593,11 +2096,59 @@ if (plmRefreshButton) {
   });
 }
 
+if (walletAssignmentBody) {
+  walletAssignmentBody.addEventListener('change', (event) => {
+    const select = event.target.closest('.wallet-assignment-select');
+    if (!select) return;
+    const walletKey = select.getAttribute('data-wallet-key') || '';
+    if (!walletKey) return;
+    const wallet = walletAssignments.find((entry) => entry.walletKey === walletKey);
+    if (!wallet) return;
+
+    const selectedAccountRef = select.value || '';
+    if (!selectedAccountRef || selectedAccountRef === wallet.effectiveAccountRef) {
+      pendingWalletAssignments.delete(walletKey);
+    } else {
+      pendingWalletAssignments.set(walletKey, selectedAccountRef);
+    }
+    renderWalletAssignments();
+  });
+
+  walletAssignmentBody.addEventListener('click', async (event) => {
+    const button = event.target.closest('.wallet-assignment-apply');
+    if (!button) return;
+
+    const walletKey = button.getAttribute('data-wallet-key') || '';
+    if (!walletKey) return;
+
+    const row = button.closest('tr');
+    const select = row?.querySelector('.wallet-assignment-select');
+    const accountRef = select?.value || '';
+    if (!accountRef) return;
+
+    try {
+      button.disabled = true;
+      await assignWalletToNode(walletKey, accountRef);
+      pendingWalletAssignments.delete(walletKey);
+    } catch (error) {
+      setWalletAssignmentStatus(error.message || 'Unable to assign wallet.');
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 if (walletAddressCopyButton) {
   walletAddressCopyButton.addEventListener('click', async () => {
     await copyWalletAddress();
   });
 }
+
+dashboardTabButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setActiveDashboardTab(button.dataset.dashboardTab || 'overview');
+  });
+});
 
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
@@ -1625,8 +2176,11 @@ if (photonProvider) {
   }
 }
 
-plmState = readPlmState();
+plmState = null;
+adminSessionToken = loadStoredAdminSessionToken();
 renderPlmState();
+updateAdminUi();
+setActiveDashboardTab('overview');
 loadDashboard();
 refreshWalletMenu();
 refreshTimer = window.setInterval(loadDashboard, 15000);

@@ -1,11 +1,21 @@
 const http = require('http');
 const { randomUUID } = require('crypto');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const { promisify } = require('util');
+const bitcoin = require('/home/waheed/PhotonBoltXYZ/photon-web-wallet/node_modules/bitcoinjs-lib');
+const ecc = require('/home/waheed/PhotonBoltXYZ/photon-web-wallet/node_modules/tiny-secp256k1');
 const {
   query,
+  withTransaction,
   ensureWallet,
+  ensureRgbNodesTable,
+  ensureRgbAssetIssuancesTable,
+  upsertRgbNode,
+  listRgbNodes,
   upsertWalletAsset,
   upsertWalletAssetBalance,
   setWalletFundingAddress,
@@ -31,6 +41,14 @@ const {
   getChannelApplicationByInvoice,
   markChannelApplicationRgbFunded,
   markChannelApplicationActive,
+  ensureBoardTicketStatusesTable,
+  listBoardTicketStatuses,
+  upsertBoardTicketStatus,
+  ensureBoardTicketsTable,
+  listBoardTickets,
+  createBoardTicket,
+  updateBoardTicket,
+  deleteBoardTicket,
 } = require('./db');
 
 const ROOT_DIR = __dirname;
@@ -75,6 +93,8 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(ENV_PATH);
 
+const execFileAsync = promisify(execFile);
+
 const PORT = Number(process.env.PORT || 8788);
 const RPC_HOST = process.env.BITCOIN_RPC_HOST || '127.0.0.1';
 const RPC_PORT = Number(process.env.BITCOIN_RPC_PORT || 18443);
@@ -82,8 +102,9 @@ const RPC_PROTOCOL = process.env.BITCOIN_RPC_PROTOCOL || 'http';
 const RPC_USER = process.env.BITCOIN_RPC_USER || 'user';
 const RPC_PASSWORD = process.env.BITCOIN_RPC_PASSWORD || 'password';
 const RPC_WALLET = process.env.BITCOIN_RPC_WALLET || 'photon_dev';
-const RGB_NODE_API_BASE = process.env.RGB_NODE_API_BASE || 'http://127.0.0.1:3001';
-const RGB_LIGHTNING_NODE_API_BASE = process.env.RGB_LIGHTNING_NODE_API_BASE || 'http://127.0.0.1:3002';
+const RGB_OWNER_API_BASE_DEFAULT = process.env.RGB_NODE_API_BASE || 'http://127.0.0.1:3001';
+const RGB_USER_API_BASE_DEFAULT = process.env.RGB_LIGHTNING_NODE_API_BASE || 'http://127.0.0.1:3002';
+const RGB_USER_B_API_BASE_DEFAULT = process.env.RGB_LIGHTNING_NODE_B_API_BASE || 'http://127.0.0.1:3003';
 const RGB_PUBLIC_PROXY_ENDPOINT =
   process.env.RGB_PUBLIC_PROXY_ENDPOINT || 'rpcs://dev-proxy.photonbolt.xyz/json-rpc';
 // Internal JSON-RPC base used by the backend for proxy queries (consignment.get / ack.get).
@@ -106,9 +127,88 @@ const MINING_ADDRESS_TYPE = process.env.FAUCET_MINING_ADDRESS_TYPE || 'bech32';
 const CLAIMS_TTL_MS = COOLDOWN_MINUTES * 60 * 1000;
 const MAX_BODY_BYTES = 8 * 1024;
 const SATS_PER_BTC = 100000000;
+const RGB_ISSUANCE_MIN_FUNDING_SATS = Number(process.env.RGB_ISSUANCE_MIN_FUNDING_SATS || 50000);
 const RGB_OWNER_WALLET_KEY = `dev-${RPC_WALLET}-regtest`;
 const RGB_OWNER_ACCOUNT_REF = 'photon-rln-issuer';
 const RGB_USER_ACCOUNT_REF = 'photon-rln-user';
+const RGB_USER_B_ACCOUNT_REF = 'photon-rln-user-b';
+const DEFAULT_RGB_NODES = [
+  {
+    accountRef: RGB_OWNER_ACCOUNT_REF,
+    label: 'Issuer Node',
+    apiBase: RGB_OWNER_API_BASE_DEFAULT,
+    role: 'issuer',
+    enabled: true,
+    sortOrder: 0,
+  },
+  {
+    accountRef: RGB_USER_ACCOUNT_REF,
+    label: 'User Node',
+    apiBase: RGB_USER_API_BASE_DEFAULT,
+    role: 'user',
+    enabled: true,
+    sortOrder: 10,
+  },
+  {
+    accountRef: RGB_USER_B_ACCOUNT_REF,
+    label: 'User Node B',
+    apiBase: RGB_USER_B_API_BASE_DEFAULT,
+    role: 'user',
+    enabled: true,
+    sortOrder: 20,
+  },
+];
+const RGB_NODE_CONTROL_TARGETS = {
+  [RGB_OWNER_ACCOUNT_REF]: {
+    target: RGB_OWNER_ACCOUNT_REF,
+    label: 'Issuer Node',
+    type: 'rgb-node',
+    container: 'photon-rln-issuer',
+    accountRef: RGB_OWNER_ACCOUNT_REF,
+  },
+  [RGB_USER_ACCOUNT_REF]: {
+    target: RGB_USER_ACCOUNT_REF,
+    label: 'User Node',
+    type: 'rgb-node',
+    container: 'photon-rln-user',
+    accountRef: RGB_USER_ACCOUNT_REF,
+  },
+  [RGB_USER_B_ACCOUNT_REF]: {
+    target: RGB_USER_B_ACCOUNT_REF,
+    label: 'User Node B',
+    type: 'rgb-node',
+    container: 'photon-rln-user-b',
+    accountRef: RGB_USER_B_ACCOUNT_REF,
+  },
+  'photon-electrs': {
+    target: 'photon-electrs',
+    label: 'Electrs',
+    type: 'infra',
+    container: 'photon-electrs',
+  },
+};
+const RGB_NODE_UNLOCK_DEFAULTS = {
+  [RGB_OWNER_ACCOUNT_REF]: {
+    password: process.env.RGB_OWNER_NODE_PASSWORD || '',
+    announceAlias: 'photon-rln-issuer',
+  },
+  [RGB_USER_ACCOUNT_REF]: {
+    password: process.env.RGB_USER_NODE_PASSWORD || '',
+    announceAlias: 'photon-rln-user',
+  },
+  [RGB_USER_B_ACCOUNT_REF]: {
+    password: process.env.RGB_USER_B_NODE_PASSWORD || '',
+    announceAlias: 'photon-rln-user-b',
+  },
+};
+const ADMIN_WALLET_ADDRESS = 'bcrt1pyzsrsnu84dmrtvthpvxfjd88pk60h3q394ulaq2q5dqun3wrj2eq4h4q95';
+const ADMIN_AUTH_HEADER = 'x-photon-admin-token';
+const BOARD_AUTH_HEADER = 'x-photon-board-token';
+const BOARD_SHARED_TOKEN = process.env.PHOTON_BOARD_SHARED_TOKEN || 'photon-board-auth-v1';
+const ADMIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const adminChallenges = new Map();
+const adminSessions = new Map();
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -123,13 +223,15 @@ const MIME_TYPES = {
 let claimState = { claims: [], rgbClaims: [] };
 let writeQueue = Promise.resolve();
 let scanQueue = Promise.resolve();
+let rgbNodeRegistry = DEFAULT_RGB_NODES.map((node) => ({ ...node }));
+let rgbNodeRegistryByRef = new Map(rgbNodeRegistry.map((node) => [node.accountRef, node]));
 
 function baseHeaders(extra = {}) {
   return {
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-photon-wallet-key',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, x-photon-wallet-key, x-photon-admin-token, x-photon-board-token',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -150,6 +252,60 @@ function sendText(res, statusCode, text) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function getKnownRgbAccountRefs() {
+  return rgbNodeRegistry.map((node) => node.accountRef);
+}
+
+function isKnownRgbAccountRef(accountRef) {
+  return rgbNodeRegistryByRef.has(accountRef);
+}
+
+function getRgbAccountRefError() {
+  const refs = getKnownRgbAccountRefs();
+  if (refs.length === 0) {
+    return 'No RGB nodes are registered.';
+  }
+  return `accountRef must be one of: ${refs.join(', ')}.`;
+}
+
+async function refreshRgbNodeRegistry() {
+  try {
+    const rows = await listRgbNodes({ enabledOnly: true });
+    if (Array.isArray(rows) && rows.length > 0) {
+      rgbNodeRegistry = rows.map((row) => ({
+        accountRef: row.account_ref,
+        label: row.label,
+        apiBase: row.api_base,
+        role: row.role,
+        enabled: row.enabled !== false,
+        sortOrder: Number(row.sort_order || 0),
+        metadata: row.metadata || {},
+      }));
+      rgbNodeRegistryByRef = new Map(rgbNodeRegistry.map((node) => [node.accountRef, node]));
+      return rgbNodeRegistry;
+    }
+  } catch (error) {
+    console.error(`[${nowIso()}] Failed to refresh RGB node registry:`, error.message);
+  }
+
+  rgbNodeRegistry = DEFAULT_RGB_NODES.map((node) => ({ ...node }));
+  rgbNodeRegistryByRef = new Map(rgbNodeRegistry.map((node) => [node.accountRef, node]));
+  return rgbNodeRegistry;
+}
+
+async function ensureRgbNodeRegistrySeeded() {
+  await ensureRgbNodesTable();
+  for (const node of DEFAULT_RGB_NODES) {
+    await upsertRgbNode(node);
+  }
+  await refreshRgbNodeRegistry();
+}
+
+async function ensureBoardSupportSeeded() {
+  await ensureBoardTicketStatusesTable();
+  await ensureBoardTicketsTable();
 }
 
 function getRemoteIp(req) {
@@ -212,8 +368,101 @@ function rewriteRgbInvoiceTransportEndpoint(invoice) {
   return `${base}?${params.toString()}`;
 }
 
+function hasExplicitWalletKeyHeader(req) {
+  const headerValue = req?.headers?.['x-photon-wallet-key'];
+  return typeof headerValue === 'string' && headerValue.trim().length > 0;
+}
+
+function pruneAdminAuthState() {
+  const now = Date.now();
+
+  for (const [challengeId, challenge] of adminChallenges.entries()) {
+    if ((challenge?.expiresAt || 0) <= now) {
+      adminChallenges.delete(challengeId);
+    }
+  }
+
+  for (const [token, session] of adminSessions.entries()) {
+    if ((session?.expiresAt || 0) <= now) {
+      adminSessions.delete(token);
+    }
+  }
+}
+
+function buildAdminChallengeMessage(address, nonce) {
+  return [
+    'PhotonBolt Admin Authentication',
+    `address:${address}`,
+    `nonce:${nonce}`,
+  ].join('\n');
+}
+
+function buildPhotonMessageDigest(message) {
+  return crypto
+    .createHash('sha256')
+    .update(Buffer.from(`Photon Signed Message:\n${message}`, 'utf8'))
+    .digest();
+}
+
+function verifyPhotonAdminSignature(address, message, signatureHex) {
+  const decoded = bitcoin.address.fromBech32(address);
+  const outputKey = Buffer.from(decoded.data);
+  const signature = Buffer.from(signatureHex, 'hex');
+
+  if (outputKey.length !== 32) {
+    throw new Error('Admin address is not a taproot address.');
+  }
+
+  if (signature.length !== 64) {
+    throw new Error('Admin signature must be a 64-byte Schnorr signature.');
+  }
+
+  const digest = buildPhotonMessageDigest(message);
+  return ecc.verifySchnorr(digest, outputKey, signature);
+}
+
+function getAdminSession(req) {
+  pruneAdminAuthState();
+  const headerValue = req.headers[ADMIN_AUTH_HEADER];
+  const token = typeof headerValue === 'string' ? headerValue.trim() : '';
+  if (!token) {
+    return null;
+  }
+  const session = adminSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    adminSessions.delete(token);
+    return null;
+  }
+  return { token, ...session };
+}
+
+function requireAdminSession(req, res) {
+  const session = getAdminSession(req);
+  if (!session) {
+    sendJson(res, 403, { ok: false, error: 'Admin authentication required.' });
+    return null;
+  }
+  return session;
+}
+
+function requireBoardSession(req, res) {
+  const headerValue = req.headers[BOARD_AUTH_HEADER];
+  const token = typeof headerValue === 'string' ? headerValue.trim() : '';
+  if (token === BOARD_SHARED_TOKEN) {
+    return { token, kind: 'board' };
+  }
+
+  const adminSession = getAdminSession(req);
+  if (adminSession) {
+    return { ...adminSession, kind: 'admin' };
+  }
+
+  sendJson(res, 403, { ok: false, error: 'Board login required.' });
+  return null;
+}
+
 async function rgbNodeRequest(endpoint, payload = {}) {
-  return rgbNodeRequestWithBase(RGB_NODE_API_BASE, endpoint, payload);
+  return rgbNodeRequestWithBase(resolveRgbNodeApiBaseForAccountRef(RGB_OWNER_ACCOUNT_REF), endpoint, payload);
 }
 
 async function rgbNodeRequestWithBase(apiBase, endpoint, payload = {}, method = 'POST') {
@@ -264,10 +513,16 @@ function getDefaultAccountRefForWallet(wallet) {
 }
 
 function resolveRgbNodeApiBaseForAccountRef(accountRef) {
-  if (accountRef === RGB_USER_ACCOUNT_REF) {
-    return RGB_LIGHTNING_NODE_API_BASE;
+  const node = rgbNodeRegistryByRef.get(accountRef);
+  if (node?.apiBase) {
+    return node.apiBase;
   }
-  return RGB_NODE_API_BASE;
+  const fallback = rgbNodeRegistryByRef.get(RGB_OWNER_ACCOUNT_REF);
+  return fallback?.apiBase || RGB_OWNER_API_BASE_DEFAULT;
+}
+
+function walletHasDedicatedRgbAccount(wallet) {
+  return Boolean(wallet?.rgb_account_ref) || wallet?.wallet_key === RGB_OWNER_WALLET_KEY;
 }
 
 // Calls POST /address on the wallet's assigned node to get a fresh Bitcoin address.
@@ -304,6 +559,479 @@ async function setWalletRgbAccountRef(walletId, accountRef) {
     `,
     [walletId, accountRef]
   );
+}
+
+function normalizeNumericString(value) {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function normalizeLiveRgbBalance(balance = {}) {
+  return {
+    settled: String(balance.settled || 0),
+    future: String(balance.future || 0),
+    spendable: String(balance.spendable || 0),
+    offchain_outbound: String(balance.offchain_outbound || 0),
+    offchain_inbound: String(balance.offchain_inbound || 0),
+  };
+}
+
+function isArchivedRegistryMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') {
+    return false;
+  }
+  const value = metadata.archived;
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase() === 'true';
+  }
+  return false;
+}
+
+async function getRegistryAssetState(contractId) {
+  if (typeof contractId !== 'string' || !contractId.trim()) {
+    return null;
+  }
+
+  const result = await query(
+    `
+      SELECT
+        token_name,
+        ticker,
+        contract_id,
+        metadata
+      FROM asset_registry
+      WHERE contract_id = $1
+      LIMIT 1
+    `,
+    [contractId.trim()]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  return {
+    tokenName: row.token_name,
+    ticker: row.ticker,
+    contractId: row.contract_id,
+    archived: isArchivedRegistryMetadata(row.metadata),
+    metadata: row.metadata || {},
+  };
+}
+
+async function assertAssetNotArchived(contractId) {
+  const asset = await getRegistryAssetState(contractId);
+  if (asset?.archived) {
+    const label = asset.ticker || asset.tokenName || asset.contractId;
+    const error = new Error(`RGB asset ${label} is archived and hidden from wallets.`);
+    error.statusCode = 410;
+    throw error;
+  }
+  return asset;
+}
+
+async function inspectWalletReassignmentSafety(wallet) {
+  const effectiveAccountRef = wallet.rgb_account_ref || getDefaultAccountRefForWallet(wallet);
+
+  const pendingTransfersResult = await query(
+    `
+      SELECT
+        t.id,
+        t.transfer_kind,
+        t.status,
+        t.settlement_status,
+        t.requested_assignment_value,
+        t.settled_amount,
+        wa.asset_id,
+        wa.ticker,
+        wa.name
+      FROM rgb_transfers t
+      LEFT JOIN wallet_assets wa ON wa.id = t.wallet_asset_id
+      WHERE t.wallet_id = $1
+        AND (
+          t.status IN ('WaitingCounterparty', 'WaitingConfirmations', 'Pending')
+          OR (
+            t.settlement_status IS NOT NULL
+            AND t.settlement_status NOT IN ('SETTLED', 'VALIDATION_FAILED', 'DELIVERY_FAILED')
+          )
+        )
+      ORDER BY t.updated_at DESC
+      LIMIT 10
+    `,
+    [wallet.id]
+  );
+
+  const assetRows = await query(
+    `
+      SELECT DISTINCT
+        wa.asset_id,
+        wa.ticker,
+        wa.name
+      FROM wallet_assets wa
+      WHERE wa.wallet_id = $1
+        AND wa.asset_id IS NOT NULL
+      ORDER BY wa.ticker NULLS LAST, wa.asset_id ASC
+    `,
+    [wallet.id]
+  );
+
+  const liveBalances = [];
+  for (const asset of assetRows.rows) {
+    const balance = await fetchWalletLightningAssetBalance(
+      {
+        ...wallet,
+        rgb_account_ref: effectiveAccountRef,
+      },
+      asset.asset_id
+    );
+
+    if (!balance) {
+      continue;
+    }
+
+    const parts = {
+      settled: normalizeNumericString(balance.settled),
+      future: normalizeNumericString(balance.future),
+      spendable: normalizeNumericString(balance.spendable),
+      outbound: normalizeNumericString(balance.offchain_outbound),
+      inbound: normalizeNumericString(balance.offchain_inbound),
+    };
+    const totalExposure = parts.settled + parts.future + parts.spendable + parts.outbound + parts.inbound;
+    if (totalExposure <= 0) {
+      continue;
+    }
+
+    liveBalances.push({
+      assetId: asset.asset_id,
+      ticker: asset.ticker || asset.name || asset.asset_id,
+      ...parts,
+    });
+  }
+
+  const reasons = [];
+  if (pendingTransfersResult.rows.length > 0) {
+    const summary = pendingTransfersResult.rows
+      .slice(0, 3)
+      .map((row) => {
+        const ticker = row.ticker || row.name || row.asset_id || 'asset';
+        const amount = row.requested_assignment_value || row.settled_amount || '0';
+        const settlement = row.settlement_status ? `/${row.settlement_status}` : '';
+        return `${ticker} ${row.transfer_kind} ${amount} (${row.status}${settlement})`;
+      })
+      .join('; ');
+    reasons.push(`Pending or unfinished RGB transfers exist on ${effectiveAccountRef}: ${summary}`);
+  }
+
+  if (liveBalances.length > 0) {
+    const summary = liveBalances
+      .slice(0, 3)
+      .map((row) => {
+        const parts = [];
+        if (row.settled > 0) parts.push(`settled ${row.settled}`);
+        if (row.future > 0) parts.push(`future ${row.future}`);
+        if (row.inbound > 0) parts.push(`inbound ${row.inbound}`);
+        if (row.outbound > 0) parts.push(`outbound ${row.outbound}`);
+        return `${row.ticker}: ${parts.join(', ')}`;
+      })
+      .join('; ');
+    reasons.push(`Live RGB balances still exist on ${effectiveAccountRef}: ${summary}`);
+  }
+
+  return {
+    safe: reasons.length === 0,
+    effectiveAccountRef,
+    pendingTransfers: pendingTransfersResult.rows,
+    liveBalances,
+    reasons,
+  };
+}
+
+function toWalletAssignmentRow(row) {
+  const effectiveAccountRef =
+    row.rgb_account_ref || (row.wallet_key === RGB_OWNER_WALLET_KEY ? RGB_OWNER_ACCOUNT_REF : null);
+
+  return {
+    walletKey: row.wallet_key,
+    displayName: row.display_name || row.wallet_key,
+    network: row.network,
+    rgbAccountRef: row.rgb_account_ref || null,
+    effectiveAccountRef,
+    mainBtcAddress: row.main_btc_address || null,
+    utxoFundingAddress: row.utxo_funding_address || null,
+    lastSeenAt: row.last_seen_at || null,
+    updatedAt: row.updated_at || null,
+    isOwnerWallet: row.wallet_key === RGB_OWNER_WALLET_KEY,
+    canAssign: row.wallet_key !== RGB_OWNER_WALLET_KEY,
+  };
+}
+
+async function handleRgbWalletAssignments(res) {
+  try {
+    const result = await query(
+      `
+        SELECT
+          wallet_key,
+          display_name,
+          network,
+          rgb_account_ref,
+          main_btc_address,
+          utxo_funding_address,
+          last_seen_at,
+          updated_at
+        FROM wallets
+        WHERE network = 'regtest'
+        ORDER BY
+          CASE WHEN wallet_key = $1 THEN 0 ELSE 1 END,
+          last_seen_at DESC NULLS LAST,
+          updated_at DESC NULLS LAST,
+          wallet_key ASC
+      `,
+      [RGB_OWNER_WALLET_KEY]
+    );
+
+    sendJson(res, 200, {
+      ok: true,
+      wallets: result.rows.map(toWalletAssignmentRow),
+      accountRefs: getKnownRgbAccountRefs(),
+      nodes: rgbNodeRegistry.map((node) => ({
+        accountRef: node.accountRef,
+        label: node.label,
+        role: node.role,
+        apiBase: node.apiBase,
+      })),
+    });
+  } catch (error) {
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleAdminAuthChallenge(res, parsedUrl) {
+  pruneAdminAuthState();
+  const address = typeof parsedUrl.searchParams.get('address') === 'string'
+    ? parsedUrl.searchParams.get('address').trim()
+    : '';
+
+  if (!address) {
+    sendJson(res, 400, { ok: false, error: 'address is required.' });
+    return;
+  }
+
+  if (address !== ADMIN_WALLET_ADDRESS) {
+    sendJson(res, 403, { ok: false, error: 'Only the configured admin wallet can request an admin challenge.' });
+    return;
+  }
+
+  const challengeId = randomUUID();
+  const nonce = randomUUID();
+  const message = buildAdminChallengeMessage(address, nonce);
+  const expiresAt = Date.now() + ADMIN_CHALLENGE_TTL_MS;
+  adminChallenges.set(challengeId, { address, message, expiresAt });
+
+  sendJson(res, 200, {
+    ok: true,
+    challengeId,
+    message,
+    address,
+    expiresAt: new Date(expiresAt).toISOString(),
+  });
+}
+
+async function handleAdminAuthVerify(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  pruneAdminAuthState();
+
+  const challengeId = typeof body.challengeId === 'string' ? body.challengeId.trim() : '';
+  const address = typeof body.address === 'string' ? body.address.trim() : '';
+  const signature = typeof body.signature === 'string' ? body.signature.trim() : '';
+
+  if (!challengeId || !address || !signature) {
+    sendJson(res, 400, { ok: false, error: 'challengeId, address, and signature are required.' });
+    return;
+  }
+
+  if (address !== ADMIN_WALLET_ADDRESS) {
+    sendJson(res, 403, { ok: false, error: 'Only the configured admin wallet can authenticate.' });
+    return;
+  }
+
+  const challenge = adminChallenges.get(challengeId);
+  if (!challenge || challenge.expiresAt <= Date.now()) {
+    adminChallenges.delete(challengeId);
+    sendJson(res, 400, { ok: false, error: 'Admin challenge expired. Request a new one.' });
+    return;
+  }
+
+  if (challenge.address !== address) {
+    sendJson(res, 403, { ok: false, error: 'Admin challenge address mismatch.' });
+    return;
+  }
+
+  let verified = false;
+  try {
+    verified = verifyPhotonAdminSignature(address, challenge.message, signature);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  if (!verified) {
+    sendJson(res, 403, { ok: false, error: 'Admin signature verification failed.' });
+    return;
+  }
+
+  adminChallenges.delete(challengeId);
+  const token = randomUUID();
+  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
+  adminSessions.set(token, {
+    address,
+    expiresAt,
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    token,
+    address,
+    expiresAt: new Date(expiresAt).toISOString(),
+  });
+}
+
+async function handleAdminAuthLogout(req, res) {
+  const session = getAdminSession(req);
+  if (session?.token) {
+    adminSessions.delete(session.token);
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleRgbWalletAssignmentUpdate(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const walletKey = typeof body.walletKey === 'string' ? body.walletKey.trim() : '';
+  const accountRef = typeof body.accountRef === 'string' ? body.accountRef.trim() : '';
+  const forceAssign = Boolean(body.forceAssign);
+
+  if (!walletKey) {
+    sendJson(res, 400, { ok: false, error: 'walletKey is required.' });
+    return;
+  }
+
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
+    return;
+  }
+
+  try {
+    const existing = await query(
+      `
+        SELECT
+          id,
+          wallet_key,
+          display_name,
+          network,
+          rgb_account_ref,
+          main_btc_address,
+          utxo_funding_address,
+          last_seen_at,
+          updated_at
+        FROM wallets
+        WHERE wallet_key = $1
+          AND network = 'regtest'
+        LIMIT 1
+      `,
+      [walletKey]
+    );
+
+    const wallet = existing.rows[0];
+    if (!wallet) {
+      sendJson(res, 404, { ok: false, error: 'Wallet not found.' });
+      return;
+    }
+
+    if (wallet.wallet_key === RGB_OWNER_WALLET_KEY) {
+      sendJson(res, 400, { ok: false, error: 'The issuer owner wallet stays pinned to photon-rln-issuer.' });
+      return;
+    }
+
+    const currentEffectiveAccountRef =
+      wallet.rgb_account_ref || getDefaultAccountRefForWallet(wallet);
+
+    if (currentEffectiveAccountRef === accountRef) {
+      sendJson(res, 200, {
+        ok: true,
+        wallet: toWalletAssignmentRow(wallet),
+        message: `${walletKey} is already assigned to ${accountRef}.`,
+      });
+      return;
+    }
+
+    const safety = await inspectWalletReassignmentSafety(wallet);
+    if (!safety.safe && !forceAssign) {
+      sendJson(res, 409, {
+        ok: false,
+        error: `Wallet reassignment blocked. This wallet is not clean to move from ${safety.effectiveAccountRef} to ${accountRef}. ${safety.reasons.join(' ')}`,
+        details: {
+          fromAccountRef: safety.effectiveAccountRef,
+          toAccountRef: accountRef,
+          forceAssignable: true,
+          pendingTransfers: safety.pendingTransfers.map((row) => ({
+            id: row.id,
+            assetId: row.asset_id || null,
+            ticker: row.ticker || row.name || row.asset_id || 'asset',
+            transferKind: row.transfer_kind,
+            status: row.status,
+            settlementStatus: row.settlement_status || null,
+            amount: row.requested_assignment_value || row.settled_amount || '0',
+          })),
+          liveBalances: safety.liveBalances,
+        },
+      });
+      return;
+    }
+
+    await setWalletRgbAccountRef(wallet.id, accountRef);
+
+    const updated = await query(
+      `
+        SELECT
+          wallet_key,
+          display_name,
+          network,
+          rgb_account_ref,
+          main_btc_address,
+          utxo_funding_address,
+          last_seen_at,
+          updated_at
+        FROM wallets
+        WHERE id = $1
+      `,
+      [wallet.id]
+    );
+
+    sendJson(res, 200, {
+      ok: true,
+      wallet: toWalletAssignmentRow(updated.rows[0]),
+      message: `${walletKey} is now assigned to ${accountRef}.${forceAssign ? ' Forced reassignment was used.' : ''}`,
+    });
+  } catch (error) {
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
 }
 
 async function fetchWalletLightningAssetBalance(wallet, assetId) {
@@ -348,18 +1076,11 @@ async function listNodeChannels(apiBase) {
 }
 
 function getChannelDashboardNodeSources() {
-  return [
-    {
-      label: 'Issuer Node',
-      accountRef: RGB_OWNER_ACCOUNT_REF,
-      apiBase: resolveRgbNodeApiBaseForAccountRef(RGB_OWNER_ACCOUNT_REF),
-    },
-    {
-      label: 'User Node',
-      accountRef: RGB_USER_ACCOUNT_REF,
-      apiBase: resolveRgbNodeApiBaseForAccountRef(RGB_USER_ACCOUNT_REF),
-    },
-  ];
+  return rgbNodeRegistry.map((node) => ({
+    label: node.label,
+    accountRef: node.accountRef,
+    apiBase: node.apiBase,
+  }));
 }
 
 function normalizeDashboardTimestamp(value) {
@@ -784,6 +1505,10 @@ function deriveLightningSettlementStatus(direction, paymentStatus) {
 }
 
 async function syncWalletLightningPayments(wallet, assetId = null, walletAssetId = null) {
+  if (!walletHasDedicatedRgbAccount(wallet)) {
+    return new Set();
+  }
+
   const { apiBase } = resolveWalletNodeContext(wallet);
   const payments = await listNodePayments(apiBase);
   const filtered = payments.filter((payment) => {
@@ -1218,6 +1943,69 @@ async function findWalletInvoiceByRecipient(walletId, recipientId, walletAssetId
       LIMIT 1
     `,
     params
+  );
+
+  return result.rows[0] || null;
+}
+
+async function findStoredInvoiceByString(invoiceString) {
+  if (!invoiceString) {
+    return null;
+  }
+
+  const result = await query(
+    `
+      SELECT
+        i.id,
+        i.wallet_id,
+        i.wallet_asset_id,
+        i.invoice_string,
+        i.recipient_id,
+        i.status,
+        i.metadata,
+        w.wallet_key,
+        w.rgb_account_ref,
+        wa.asset_id,
+        wa.contract_id,
+        wa.ticker,
+        wa.name,
+        wa.precision
+      FROM rgb_invoices i
+      JOIN wallets w
+        ON w.id = i.wallet_id
+      LEFT JOIN wallet_assets wa
+        ON wa.id = i.wallet_asset_id
+      WHERE i.invoice_string = $1
+      LIMIT 1
+    `,
+    [invoiceString]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function findExistingSameNodeTransfer(walletId, invoiceString) {
+  if (!walletId || !invoiceString) {
+    return null;
+  }
+
+  const result = await query(
+    `
+      SELECT
+        id,
+        wallet_asset_id,
+        status,
+        settled_amount,
+        settled_at,
+        metadata
+      FROM rgb_transfers
+      WHERE wallet_id = $1
+        AND metadata->>'route' = 'internal_same_node'
+        AND metadata->>'invoice' = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [walletId, invoiceString]
   );
 
   return result.rows[0] || null;
@@ -1756,7 +2544,26 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
 }
 
 async function syncWalletAssetFromRgbNode({ walletId, assetId }) {
-  const assetList = await rgbNodeRequest('/listassets', { filter_asset_schemas: ['Nia', 'Uda', 'Cfa'] });
+  const walletResult = await query(
+    `
+      SELECT id, wallet_key, rgb_account_ref
+      FROM wallets
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [walletId]
+  );
+  const walletRow = walletResult.rows[0];
+  if (!walletRow) {
+    throw new Error(`Wallet ${walletId} was not found while syncing asset ${assetId}`);
+  }
+
+  const assetApiBase = resolveRgbNodeApiBaseForAccountRef(
+    walletRow.rgb_account_ref || getDefaultAccountRefForWallet(walletRow)
+  );
+  const assetList = await rgbNodeRequestWithBase(assetApiBase, '/listassets', {
+    filter_asset_schemas: ['Nia', 'Uda', 'Cfa'],
+  });
 
   const asset =
     assetList?.nia?.find((entry) => entry.asset_id === assetId) ||
@@ -1784,6 +2591,10 @@ async function syncWalletAssetFromRgbNode({ walletId, assetId }) {
 }
 
 async function syncWalletTransferRows(wallet, assetId, walletAssetId) {
+  if (!walletHasDedicatedRgbAccount(wallet)) {
+    return [];
+  }
+
   const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
   const transferList = await rgbNodeRequestWithBase(walletApiBase, '/listtransfers', { asset_id: assetId });
   const transfers = Array.isArray(transferList?.transfers) ? transferList.transfers : [];
@@ -2007,13 +2818,45 @@ async function handleRgbBalance(req, res) {
   }
 
   try {
+    await assertAssetNotArchived(assetId);
     const wallet = await ensureWalletWithFunding(req, 'regtest');
+    if (!walletHasDedicatedRgbAccount(wallet)) {
+      sendJson(res, 200, {
+        ok: true,
+        walletKey: wallet.wallet_key,
+        asset: {
+          assetId,
+          ticker: null,
+          name: assetId,
+          precision: 0,
+        },
+        balance: {
+          settled: '0',
+          future: '0',
+          spendable: '0',
+          offchain_outbound: '0',
+          offchain_inbound: '0',
+          locked_missing_secret: '0',
+          locked_unconfirmed: '0',
+          spendability_status: 'spendable',
+        },
+      });
+      return;
+    }
+
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const transfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
     await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
-    const balance = derivedBalance;
+    const balance = synced.asset?.balance
+      ? {
+        ...normalizeLiveRgbBalance(synced.asset.balance),
+        locked_missing_secret: '0',
+        locked_unconfirmed: '0',
+        spendability_status: 'spendable',
+      }
+      : derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     sendJson(res, 200, {
       ok: true,
@@ -2028,7 +2871,7 @@ async function handleRgbBalance(req, res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [RGB API] Balance lookup failed:`, error.message);
-    sendJson(res, 502, { ok: false, error: error.message });
+    sendJson(res, error.statusCode || 502, { ok: false, error: error.message });
   }
 }
 
@@ -2113,8 +2956,18 @@ async function handleRgbLightningInvoice(req, res) {
     return;
   }
 
+  if (!hasExplicitWalletKeyHeader(req)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'x-photon-wallet-key header is required for RGB Lightning invoice generation to avoid creating the invoice on the wrong node.',
+    });
+    return;
+  }
+
   try {
+    await assertAssetNotArchived(assetId);
     const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const { apiBase } = resolveWalletNodeContext(wallet);
     const invoiceResponse = await rgbNodeRequestWithBase(apiBase, '/lninvoice', {
       expiry_sec: expirySec,
@@ -2127,6 +2980,37 @@ async function handleRgbLightningInvoice(req, res) {
       invoice: invoiceResponse.invoice,
     });
 
+    const expirationTimestamp =
+      Number.isFinite(Number(decoded?.timestamp)) && Number.isFinite(Number(decoded?.expiry_sec))
+        ? Number(decoded.timestamp) + Number(decoded.expiry_sec)
+        : null;
+
+    await recordRgbInvoice({
+      walletId: wallet.id,
+      walletAssetId: synced.walletAsset.id,
+      invoice: {
+        invoice: invoiceResponse.invoice,
+        recipient_id:
+          (typeof decoded?.payment_hash === 'string' && decoded.payment_hash.trim()) ||
+          (typeof invoiceResponse?.invoice_id === 'string' && invoiceResponse.invoice_id.trim()) ||
+          `ln:${randomUUID()}`,
+        recipient_type: 'LightningPaymentHash',
+        assignment: { type: 'Fungible', value: assetAmount },
+        expiration_timestamp: expirationTimestamp,
+        payment_hash: decoded?.payment_hash || null,
+        payee_pubkey: decoded?.payee_pubkey || null,
+        asset_id: decoded?.asset_id || assetId,
+        asset_amount: decoded?.asset_amount ?? assetAmount,
+        amt_msat: decoded?.amt_msat ?? amtMsat,
+        expiry_sec: decoded?.expiry_sec ?? expirySec,
+        timestamp: decoded?.timestamp || null,
+        account_ref: resolveWalletNodeContext(wallet).accountRef,
+        invoice_kind: 'lightning',
+      },
+      openAmount: false,
+      proxyEndpoint: null,
+    });
+
     sendJson(res, 200, {
       ok: true,
       walletKey: wallet.wallet_key,
@@ -2135,7 +3019,7 @@ async function handleRgbLightningInvoice(req, res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [RGB API] Lightning invoice generation failed:`, error.message);
-    sendJson(res, 502, { ok: false, error: error.message });
+    sendJson(res, error.statusCode || 502, { ok: false, error: error.message });
   }
 }
 
@@ -2156,6 +3040,26 @@ async function handleRgbTransfers(req, res) {
 
   try {
     const wallet = await ensureWalletWithFunding(req, 'regtest');
+    if (!walletHasDedicatedRgbAccount(wallet)) {
+      sendJson(res, 200, {
+        ok: true,
+        walletKey: wallet.wallet_key,
+        assetId,
+        balance: {
+          settled: '0',
+          future: '0',
+          spendable: '0',
+          offchain_outbound: '0',
+          offchain_inbound: '0',
+          locked_missing_secret: '0',
+          locked_unconfirmed: '0',
+          spendability_status: 'spendable',
+        },
+        transfers: [],
+      });
+      return;
+    }
+
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
     const runtimeTransfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
     await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
@@ -2164,18 +3068,6 @@ async function handleRgbTransfers(req, res) {
     const balance = derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     const transfers = await getStoredWalletTransfers(wallet.id, synced.walletAsset.id);
-    const matchedApplication = await getChannelApplicationByInvoice(invoice);
-    if (matchedApplication) {
-      await markChannelApplicationRgbFunded({
-        id: matchedApplication.id,
-        paymentHash: payment.payment_hash || paymentResult?.payment_hash || null,
-        paymentStatus: payment.status || paymentResult?.status || 'Pending',
-        metadata: {
-          rgbFundingInvoicePaidAt: new Date().toISOString(),
-        },
-      });
-      await maybeAutoOpenChannelApplication({ id: matchedApplication.id });
-    }
 
     sendJson(res, 200, {
       ok: true,
@@ -2224,6 +3116,8 @@ async function handleRgbSend(req, res) {
     if (!assetId || !recipientId || !amount || !endpoint) {
       throw new Error('Decoded RGB invoice is missing required send fields.');
     }
+
+    await assertAssetNotArchived(assetId);
 
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
 
@@ -2299,7 +3193,7 @@ async function handleRgbSend(req, res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [RGB API] Send failed:`, error.message);
-    sendJson(res, 502, { ok: false, error: error.message });
+    sendJson(res, error.statusCode || 502, { ok: false, error: error.message });
   }
 }
 
@@ -2343,14 +3237,321 @@ async function handleRgbRefresh(req, res) {
   }
 }
 
+async function executeSameNodeWalletTransfer({
+  senderWallet,
+  senderAccountRef,
+  receiverInvoice,
+  decoded,
+  invoice,
+  eventSource,
+}) {
+  if (!receiverInvoice?.id) {
+    throw new Error('Stored receiver invoice is required for same-node transfer.');
+  }
+
+  if (receiverInvoice.wallet_id === senderWallet.id) {
+    throw new Error('Cannot pay your own invoice from the same wallet.');
+  }
+
+  if (!['open', 'pending_consignment', 'acknowledged'].includes(receiverInvoice.status)) {
+    const existingTransfer = await findExistingSameNodeTransfer(senderWallet.id, invoice);
+    if (existingTransfer) {
+      const assetId = receiverInvoice.asset_id || decoded?.asset_id || null;
+      if (!assetId) {
+        throw new Error('Existing same-node transfer is missing an asset id.');
+      }
+      const senderBalance = await deriveWalletScopedBalance(existingTransfer.wallet_asset_id);
+      await upsertWalletAssetBalance(existingTransfer.wallet_asset_id, senderBalance);
+      return {
+        wallet: senderWallet,
+        assetId,
+        balance: senderBalance,
+        payment: {
+          ...decoded,
+          status: existingTransfer.status === 'Settled' ? 'Succeeded' : existingTransfer.status,
+          inbound: false,
+        },
+        paymentResult: {
+          payment_hash: decoded?.payment_hash || existingTransfer.metadata?.payment_hash || null,
+          status: existingTransfer.status === 'Settled' ? 'Succeeded' : existingTransfer.status,
+        },
+        decoded,
+      };
+    }
+    throw new Error('Lightning invoice is no longer open.');
+  }
+
+  const assetId = receiverInvoice.asset_id || decoded?.asset_id || null;
+  const assetAmountValue = decoded?.asset_amount;
+  if (!assetId) {
+    throw new Error('Stored Lightning invoice is missing an RGB asset id.');
+  }
+  if (assetAmountValue === undefined || assetAmountValue === null || Number(assetAmountValue) <= 0) {
+    throw new Error('Stored Lightning invoice is missing a valid RGB asset amount.');
+  }
+
+  const senderSynced = await syncWalletAssetFromRgbNode({ walletId: senderWallet.id, assetId });
+  const receiverWallet = {
+    id: receiverInvoice.wallet_id,
+    wallet_key: receiverInvoice.wallet_key,
+    rgb_account_ref: receiverInvoice.rgb_account_ref,
+  };
+  const receiverWalletAsset =
+    receiverInvoice.wallet_asset_id
+      ? { id: receiverInvoice.wallet_asset_id }
+      : (await syncWalletAssetFromRgbNode({ walletId: receiverWallet.id, assetId })).walletAsset;
+
+  const senderBalanceBefore = await deriveWalletScopedBalance(senderSynced.walletAsset.id);
+  const requestedAmount = BigInt(normalizeTransferAmount(assetAmountValue));
+  const availableAmount =
+    BigInt(normalizeTransferAmount(senderBalanceBefore.spendable)) +
+    BigInt(normalizeTransferAmount(senderBalanceBefore.offchain_outbound));
+  if (availableAmount < requestedAmount) {
+    throw new Error(
+      `Insufficient spendable balance for same-node transfer. Required ${requestedAmount.toString()}, available ${availableAmount.toString()}.`
+    );
+  }
+
+  const sameNodeTransferId = randomUUID();
+  const paymentHash =
+    (typeof decoded?.payment_hash === 'string' && decoded.payment_hash.trim()) ||
+    (typeof receiverInvoice.recipient_id === 'string' && receiverInvoice.recipient_id.trim()) ||
+    null;
+  const settledAt = new Date();
+  const outgoingMetadata = {
+    payment_hash: paymentHash,
+    payment_secret: decoded?.payment_secret || null,
+    payee_pubkey: decoded?.payee_pubkey || null,
+    route: 'internal_same_node',
+    invoice,
+    amt_msat: decoded?.amt_msat ?? null,
+    inbound: false,
+    same_node_transfer_id: sameNodeTransferId,
+    node_account_ref: senderAccountRef,
+    receiver_wallet_id: receiverWallet.id,
+    receiver_wallet_key: receiverWallet.wallet_key,
+  };
+  const incomingMetadata = {
+    payment_hash: paymentHash,
+    payment_secret: decoded?.payment_secret || null,
+    payee_pubkey: decoded?.payee_pubkey || null,
+    route: 'internal_same_node',
+    invoice,
+    amt_msat: decoded?.amt_msat ?? null,
+    inbound: true,
+    same_node_transfer_id: sameNodeTransferId,
+    node_account_ref: senderAccountRef,
+    sender_wallet_id: senderWallet.id,
+    sender_wallet_key: senderWallet.wallet_key,
+  };
+
+  const txResult = await withTransaction(async (client) => {
+    const invoiceUpdate = await client.query(
+      `
+        UPDATE rgb_invoices
+        SET
+          status = 'settled',
+          metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+        WHERE id = $1
+          AND status IN ('open', 'pending_consignment', 'acknowledged')
+        RETURNING id
+      `,
+      [
+        receiverInvoice.id,
+        JSON.stringify({
+          route: 'internal_same_node',
+          sameNodeTransferId,
+          settledAt: settledAt.toISOString(),
+          settledByWalletId: senderWallet.id,
+          settledByWalletKey: senderWallet.wallet_key,
+        }),
+      ]
+    );
+
+    if (invoiceUpdate.rows.length === 0) {
+      throw new Error('Lightning invoice is no longer open.');
+    }
+
+    const outgoingTransfer = await client.query(
+      `
+        INSERT INTO rgb_transfers (
+          wallet_id,
+          wallet_asset_id,
+          invoice_id,
+          direction,
+          transfer_kind,
+          status,
+          recipient_id,
+          requested_assignment_type,
+          requested_assignment_value,
+          settled_amount,
+          settled_at,
+          metadata,
+          settlement_status
+        )
+        VALUES ($1, $2, $3, 'outgoing', 'LightningSend', 'Settled', $4, 'Fungible', $5, $5, $6, $7, 'SETTLED'::settlement_status_enum)
+        RETURNING id
+      `,
+      [
+        senderWallet.id,
+        senderSynced.walletAsset.id,
+        receiverInvoice.id,
+        receiverInvoice.recipient_id,
+        requestedAmount.toString(),
+        settledAt,
+        JSON.stringify(outgoingMetadata),
+      ]
+    );
+
+    const incomingTransfer = await client.query(
+      `
+        INSERT INTO rgb_transfers (
+          wallet_id,
+          wallet_asset_id,
+          invoice_id,
+          direction,
+          transfer_kind,
+          status,
+          recipient_id,
+          requested_assignment_type,
+          requested_assignment_value,
+          settled_amount,
+          settled_at,
+          metadata,
+          settlement_status
+        )
+        VALUES ($1, $2, $3, 'incoming', 'LightningReceive', 'Settled', $4, 'Fungible', $5, $5, $6, $7, 'SETTLED'::settlement_status_enum)
+        RETURNING id
+      `,
+      [
+        receiverWallet.id,
+        receiverWalletAsset.id,
+        receiverInvoice.id,
+        receiverInvoice.recipient_id,
+        requestedAmount.toString(),
+        settledAt,
+        JSON.stringify(incomingMetadata),
+      ]
+    );
+
+    await client.query(
+      `
+        INSERT INTO transfer_events (
+          wallet_id,
+          transfer_id,
+          invoice_id,
+          event_type,
+          event_source,
+          payload
+        )
+        VALUES
+          ($1, $2, $3, 'same_node_transfer_sent', $4, $5),
+          ($6, $7, $3, 'same_node_transfer_received', $4, $8)
+      `,
+      [
+        senderWallet.id,
+        outgoingTransfer.rows[0].id,
+        receiverInvoice.id,
+        eventSource,
+        JSON.stringify({
+          sameNodeTransferId,
+          invoice,
+          assetId,
+          assetAmount: requestedAmount.toString(),
+          counterpartyWalletId: receiverWallet.id,
+          counterpartyWalletKey: receiverWallet.wallet_key,
+          nodeAccountRef: senderAccountRef,
+        }),
+        receiverWallet.id,
+        incomingTransfer.rows[0].id,
+        JSON.stringify({
+          sameNodeTransferId,
+          invoice,
+          assetId,
+          assetAmount: requestedAmount.toString(),
+          counterpartyWalletId: senderWallet.id,
+          counterpartyWalletKey: senderWallet.wallet_key,
+          nodeAccountRef: senderAccountRef,
+        }),
+      ]
+    );
+
+    return {
+      outgoingTransferId: outgoingTransfer.rows[0].id,
+      incomingTransferId: incomingTransfer.rows[0].id,
+    };
+  });
+
+  const senderBalance = await deriveWalletScopedBalance(senderSynced.walletAsset.id);
+  const receiverBalance = await deriveWalletScopedBalance(receiverWalletAsset.id);
+  await upsertWalletAssetBalance(senderSynced.walletAsset.id, senderBalance);
+  await upsertWalletAssetBalance(receiverWalletAsset.id, receiverBalance);
+
+  const payment = {
+    ...decoded,
+    payment_hash: paymentHash,
+    asset_id: assetId,
+    asset_amount: requestedAmount.toString(),
+    status: 'Succeeded',
+    inbound: false,
+  };
+
+  return {
+    wallet: senderWallet,
+    assetId,
+    balance: senderBalance,
+    payment,
+    paymentResult: {
+      payment_hash: paymentHash,
+      status: 'Succeeded',
+      transfer_id: txResult.outgoingTransferId,
+    },
+    decoded,
+  };
+}
+
 async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_api' }) {
   const wallet = await ensureWalletWithFunding(req, 'regtest');
   const { accountRef, apiBase } = resolveWalletNodeContext(wallet);
   const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice });
   const assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
+  const payeePubkey = typeof decoded?.payee_pubkey === 'string' ? decoded.payee_pubkey : null;
+  const storedInvoice = await findStoredInvoiceByString(invoice);
 
   if (!assetId) {
     throw new Error('Lightning invoice is missing an RGB asset id.');
+  }
+
+  if (storedInvoice?.wallet_id === wallet.id) {
+    throw new Error('Cannot pay your own invoice from the same wallet.');
+  }
+
+  if (storedInvoice) {
+    const receiverWallet = {
+      wallet_key: storedInvoice.wallet_key,
+      rgb_account_ref: storedInvoice.rgb_account_ref,
+    };
+    const receiverAccountRef = storedInvoice.rgb_account_ref || getDefaultAccountRefForWallet(receiverWallet);
+    if (receiverAccountRef === accountRef) {
+      return executeSameNodeWalletTransfer({
+        senderWallet: wallet,
+        senderAccountRef: accountRef,
+        receiverInvoice: storedInvoice,
+        decoded,
+        invoice,
+        eventSource,
+      });
+    }
+  }
+
+  if (payeePubkey) {
+    const nodeInfo = await rgbNodeRequestWithBase(apiBase, '/nodeinfo', {}, 'GET');
+    const senderPubkey = typeof nodeInfo?.pubkey === 'string' ? nodeInfo.pubkey : null;
+    if (senderPubkey && senderPubkey === payeePubkey) {
+      throw new Error(
+        `RGB Lightning invoice belongs to the sender node. Generate the invoice from a different wallet/node first (${senderPubkey}).`
+      );
+    }
   }
 
   const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
@@ -2365,17 +3566,55 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
   });
 
   const paymentResult = await rgbNodeRequestWithBase(apiBase, '/sendpayment', { invoice });
-  const payments = await listNodePayments(apiBase);
-  const payment = payments.find((entry) => entry.payment_hash === paymentResult?.payment_hash) || {
+  const paymentHash = paymentResult?.payment_hash || decoded?.payment_hash || null;
+  let payment = {
     ...decoded,
     ...paymentResult,
     status: paymentResult?.status || 'Pending',
     inbound: false,
   };
+  const shouldRetryPending = Boolean(paymentHash);
+
+  if (paymentHash) {
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const payments = await listNodePayments(apiBase);
+      const matched = payments.find((entry) => entry.payment_hash === paymentHash);
+      if (matched) {
+        payment = matched;
+        if (matched.status === 'Succeeded' || matched.status === 'Failed') {
+          break;
+        }
+      }
+
+      if (!shouldRetryPending || attempt === 14) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
+  console.log(`[${nowIso()}] [RGB API] sendpayment result`, {
+    eventSource,
+    accountRef,
+    assetId,
+    paymentHash,
+    paymentResult,
+    matchedPayment: payment,
+  });
 
   if (payment.status !== 'Succeeded') {
     const failedSettlement = deriveLightningSettlementStatus('outgoing', payment.status) || 'DELIVERY_FAILED';
     await updateLightningTransferSettlementStatus(transferId, failedSettlement, payment);
+    console.warn(`[${nowIso()}] [RGB API] sendpayment did not succeed`, {
+      eventSource,
+      accountRef,
+      assetId,
+      paymentHash: payment.payment_hash || paymentResult?.payment_hash || decoded?.payment_hash || null,
+      paymentStatus: payment.status || paymentResult?.status || 'unknown',
+      paymentResult,
+      matchedPayment: payment,
+    });
     throw new Error(
       `RGB Lightning payment failed: ${payment.status || paymentResult?.status || 'unknown'}${payment.payment_hash ? ` (${payment.payment_hash})` : ''}`
     );
@@ -2669,8 +3908,8 @@ async function handleChannelApplicationCreate(req, res) {
     sendJson(res, 400, { ok: false, error: 'ownerWalletAddress is required.' });
     return;
   }
-  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
-    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
     return;
   }
   if (!/^[0-9a-fA-F]{66}$/.test(peerPubkey)) {
@@ -2915,6 +4154,7 @@ async function handleRgbRegistry(res) {
           contract_id,
           schema_id
         FROM asset_registry
+        WHERE COALESCE((metadata->>'archived')::boolean, FALSE) = FALSE
         ORDER BY created_at DESC, token_name ASC
       `
     );
@@ -2929,6 +4169,696 @@ async function handleRgbRegistry(res) {
   }
 }
 
+async function buildRgbIssueAssetReadiness(wallet, options = {}) {
+  const requestedChannelFundingSats = Number.isFinite(Number(options.requestedChannelFundingSats))
+    ? Math.max(0, Math.trunc(Number(options.requestedChannelFundingSats)))
+    : 0;
+  const channelFundingTiming = typeof options.channelFundingTiming === 'string'
+    ? options.channelFundingTiming
+    : 'after_issuance';
+  const { accountRef } = resolveWalletNodeContext(wallet);
+  const addresses = await getWalletAddresses(wallet.id);
+  const utxoFundingAddress = addresses?.utxo_funding_address || wallet.utxo_funding_address || null;
+  const addressStats = utxoFundingAddress ? await buildAddressStats(utxoFundingAddress) : null;
+  const confirmedFundingSats = Number(addressStats?.chain_stats?.funded_txo_sum || 0);
+  const confirmedUtxoCount = Number(addressStats?.chain_stats?.funded_txo_count || 0);
+  const slots = await getWalletUtxoSlots(wallet.id);
+  const freeSlotCount = slots.filter((slot) => slot.state === 'FREE').length;
+  const issuanceFundingReady = confirmedFundingSats >= RGB_ISSUANCE_MIN_FUNDING_SATS && confirmedUtxoCount > 0;
+  const requiredFundingSats =
+    channelFundingTiming === 'during_issuance'
+      ? RGB_ISSUANCE_MIN_FUNDING_SATS + requestedChannelFundingSats
+      : RGB_ISSUANCE_MIN_FUNDING_SATS;
+  const channelFundingReady =
+    channelFundingTiming === 'during_issuance'
+      ? confirmedFundingSats >= requiredFundingSats && confirmedUtxoCount > 0
+      : requestedChannelFundingSats > 0
+        ? false
+        : issuanceFundingReady;
+  const channelFundingShortfallSats =
+    channelFundingTiming === 'during_issuance'
+      ? Math.max(0, requiredFundingSats - confirmedFundingSats)
+      : requestedChannelFundingSats;
+
+  return {
+    walletKey: wallet.wallet_key,
+    network: 'regtest',
+    nodeAccountRef: accountRef,
+    utxoFundingAddress,
+    confirmedFundingSats,
+    confirmedUtxoCount,
+    freeSlotCount,
+    minimumFundingSats: RGB_ISSUANCE_MIN_FUNDING_SATS,
+    issuanceFundingReady,
+    channelFundingTiming,
+    requestedChannelFundingSats,
+    requiredFundingSats,
+    channelFundingReady,
+    channelFundingShortfallSats,
+    isReady: issuanceFundingReady,
+  };
+}
+
+function getPrimaryBootstrapPeerAccountRef(accountRef) {
+  if (accountRef === RGB_USER_ACCOUNT_REF) {
+    return RGB_USER_B_ACCOUNT_REF;
+  }
+  if (accountRef === RGB_USER_B_ACCOUNT_REF) {
+    return RGB_USER_ACCOUNT_REF;
+  }
+  return RGB_USER_ACCOUNT_REF;
+}
+
+async function fetchNodePubkeyForAccountRef(accountRef) {
+  const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+  const nodeInfo = await rgbNodeRequestWithBase(apiBase, '/nodeinfo', {}, 'GET');
+  const pubkey = typeof nodeInfo?.pubkey === 'string' ? nodeInfo.pubkey.trim() : '';
+  if (!pubkey) {
+    throw new Error(`Unable to resolve peer pubkey for account ref ${accountRef}.`);
+  }
+  return pubkey;
+}
+
+async function createPrimaryBootstrapChannelApplication({
+  wallet,
+  accountRef,
+  assetId,
+  assetAmount,
+  issuanceId,
+  issuedAt,
+  requestedChannelBtcSats,
+  channelFundingTiming,
+  readiness,
+}) {
+  await ensureChannelApplicationsTable();
+  const peerAccountRef = getPrimaryBootstrapPeerAccountRef(accountRef);
+  const peerPubkey = await fetchNodePubkeyForAccountRef(peerAccountRef);
+  const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+  const addresses = await getWalletAddresses(wallet.id);
+  const ownerWalletAddress = addresses?.main_btc_address || wallet.main_btc_address || readiness.utxoFundingAddress || '';
+  if (!ownerWalletAddress) {
+    throw new Error('Cannot create primary channel bootstrap application without an owner wallet address.');
+  }
+
+  let btcDepositAddress = readiness.utxoFundingAddress || '';
+  let depositRequest = null;
+
+  if (channelFundingTiming === 'during_issuance') {
+    if (!btcDepositAddress) {
+      throw new Error('The wallet does not have a funding address for immediate channel bootstrap.');
+    }
+    depositRequest = await createDepositRequest({
+      walletId: wallet.id,
+      depositAddress: btcDepositAddress,
+      expectedSats: requestedChannelBtcSats,
+      requiredConfirmations: DEPOSIT_REQUIRED_CONFIRMATIONS,
+      nodeAccountRef: accountRef,
+    });
+    await markDepositConfirmed({ id: depositRequest.id, utxoSlotId: null });
+  } else {
+    const btcFunding = await rgbNodeRequestWithBase(apiBase, '/address', {}, 'POST');
+    btcDepositAddress = typeof btcFunding?.address === 'string' ? btcFunding.address.trim() : '';
+    if (!btcDepositAddress) {
+      throw new Error('Unable to generate a BTC deposit address for primary channel bootstrap.');
+    }
+    depositRequest = await createDepositRequest({
+      walletId: wallet.id,
+      depositAddress: btcDepositAddress,
+      expectedSats: requestedChannelBtcSats,
+      requiredConfirmations: DEPOSIT_REQUIRED_CONFIRMATIONS,
+      nodeAccountRef: accountRef,
+    });
+  }
+
+  const application = await createChannelApplication({
+    id: randomUUID(),
+    walletId: wallet.id,
+    ownerWalletAddress,
+    ownerWalletKey: wallet.wallet_key,
+    accountRef,
+    peerPubkey,
+    btcDepositAddress,
+    rgbInvoiceId: null,
+    rgbInvoice: null,
+    status: 'rgb_funded',
+    btcAmountSats: requestedChannelBtcSats,
+    rgbAssetId: assetId,
+    rgbAssetAmount: assetAmount,
+    depositRequestId: depositRequest?.id || null,
+    metadata: {
+      network: 'regtest',
+      applicationSource: 'issuance_bootstrap',
+      issuanceId,
+      createdFromIssuanceAt: issuedAt.toISOString(),
+      peerAccountRef,
+      channelFundingTiming,
+      btcFundingSatisfiedAtIssuance: channelFundingTiming === 'during_issuance',
+    },
+  });
+
+  const hydrated = await maybeAutoOpenChannelApplication(application);
+  return hydrated || application;
+}
+
+function pickIssuedAssetColor(ticker = '') {
+  if (ticker.toUpperCase() === 'PHO') {
+    return '#38bdf8';
+  }
+  return '#f8fafc';
+}
+
+async function handleRgbIssueAssetReadiness(req, res, parsedUrl) {
+  try {
+    const requestedChannelFundingSats = parsedUrl?.searchParams?.get('channelFundingSats');
+    const channelFundingTiming = parsedUrl?.searchParams?.get('channelFundingTiming');
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const readiness = await buildRgbIssueAssetReadiness(wallet, {
+      requestedChannelFundingSats,
+      channelFundingTiming,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      ...readiness,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Issue asset readiness failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleRgbIssueAsset(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const network = getRequestNetwork(body);
+  if (network !== 'regtest') {
+    sendJson(res, 400, { ok: false, error: 'RGB asset issuance is currently available only on regtest.' });
+    return;
+  }
+
+  const schema = typeof body.schema === 'string' && body.schema.trim() ? body.schema.trim().toUpperCase() : 'NIA';
+  const tokenName = typeof body.name === 'string' ? body.name.trim() : '';
+  const ticker = typeof body.ticker === 'string' ? body.ticker.trim().toUpperCase() : '';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  const precision = Number(body.precision);
+  const totalSupply = Number(body.totalSupply);
+  const publicRegistry = true;
+  const bootstrapLightning = Boolean(body.bootstrapLightning);
+  const liquidityPercentageRaw =
+    body.liquidityPercentage === null || body.liquidityPercentage === undefined || body.liquidityPercentage === ''
+      ? null
+      : Number(body.liquidityPercentage);
+  const requestedChannelBtcSatsRaw =
+    body.channelFundingSats === null || body.channelFundingSats === undefined || body.channelFundingSats === ''
+      ? null
+      : Number(body.channelFundingSats);
+  const requestedChannelFundingTiming =
+    typeof body.channelFundingTiming === 'string' && body.channelFundingTiming.trim()
+      ? body.channelFundingTiming.trim().toLowerCase()
+      : 'after_issuance';
+
+  if (schema !== 'NIA') {
+    sendJson(res, 400, { ok: false, error: 'Phase 1 supports only NIA asset issuance.' });
+    return;
+  }
+  if (!tokenName) {
+    sendJson(res, 400, { ok: false, error: 'name is required.' });
+    return;
+  }
+  if (!/^[A-Z0-9]{3,8}$/.test(ticker)) {
+    sendJson(res, 400, { ok: false, error: 'ticker must be 3-8 uppercase letters or numbers.' });
+    return;
+  }
+  if (!Number.isInteger(precision) || precision < 0 || precision > 18) {
+    sendJson(res, 400, { ok: false, error: 'precision must be an integer between 0 and 18.' });
+    return;
+  }
+  if (!Number.isFinite(totalSupply) || totalSupply <= 0 || !Number.isInteger(totalSupply)) {
+    sendJson(res, 400, { ok: false, error: 'totalSupply must be a positive integer.' });
+    return;
+  }
+  if (!['during_issuance', 'after_issuance'].includes(requestedChannelFundingTiming)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'channelFundingTiming must be either during_issuance or after_issuance.',
+    });
+    return;
+  }
+  if (liquidityPercentageRaw !== null && (!Number.isFinite(liquidityPercentageRaw) || liquidityPercentageRaw < 0 || liquidityPercentageRaw > 100)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'liquidityPercentage must be between 0 and 100.',
+    });
+    return;
+  }
+  if (requestedChannelBtcSatsRaw !== null && (!Number.isFinite(requestedChannelBtcSatsRaw) || requestedChannelBtcSatsRaw <= 0 || !Number.isInteger(requestedChannelBtcSatsRaw))) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'channelFundingSats must be a positive integer amount of sats.',
+    });
+    return;
+  }
+  if (!hasExplicitWalletKeyHeader(req)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'x-photon-wallet-key header is required for RGB asset issuance so the full supply is minted into the requesting wallet.',
+    });
+    return;
+  }
+
+  const normalizedLiquidityPercentage = bootstrapLightning ? Number((liquidityPercentageRaw ?? 0).toFixed(2)) : null;
+  const reservedAssetAmount =
+    bootstrapLightning && normalizedLiquidityPercentage !== null && normalizedLiquidityPercentage > 0
+      ? Math.floor((totalSupply * normalizedLiquidityPercentage) / 100)
+      : 0;
+  if (bootstrapLightning && normalizedLiquidityPercentage !== null && normalizedLiquidityPercentage > 0 && reservedAssetAmount <= 0) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'Selected liquidity percentage does not reserve any RGB supply. Increase the percentage or supply.',
+    });
+    return;
+  }
+  const requestedChannelBtcSats = bootstrapLightning ? requestedChannelBtcSatsRaw : null;
+  const channelBootstrapMode = bootstrapLightning ? requestedChannelFundingTiming : null;
+  const initialLifecycleStatus = bootstrapLightning
+    ? requestedChannelBtcSats && requestedChannelBtcSats > 0
+      ? 'waiting_primary_channel'
+      : 'waiting_btc_channel_funding'
+    : 'issued_registry_only';
+
+  try {
+    await ensureRgbAssetIssuancesTable();
+    const wallet = await ensureWalletWithFunding(req, 'regtest');
+    const readiness = await buildRgbIssueAssetReadiness(wallet, {
+      requestedChannelFundingSats,
+      channelFundingTiming: requestedChannelFundingTiming,
+    });
+    if (!readiness.isReady) {
+      sendJson(res, 409, {
+        ok: false,
+        error: `Asset issuance requires BTC funding and confirmed UTXOs. Fund ${readiness.utxoFundingAddress || 'the wallet'} with at least ${RGB_ISSUANCE_MIN_FUNDING_SATS} sats first.`,
+        readiness,
+      });
+      return;
+    }
+    if (channelBootstrapMode === 'during_issuance' && requestedChannelBtcSats && !readiness.channelFundingReady) {
+      sendJson(res, 409, {
+        ok: false,
+        error: `Primary channel bootstrap during issuance requires ${readiness.requiredFundingSats.toLocaleString()} sats in the funding wallet. Current shortfall: ${readiness.channelFundingShortfallSats.toLocaleString()} sats.`,
+        readiness,
+      });
+      return;
+    }
+
+    const duplicate = await query(
+      `
+        SELECT contract_id
+        FROM asset_registry
+        WHERE network = 'regtest'
+          AND lower(ticker) = lower($1)
+        LIMIT 1
+      `,
+      [ticker]
+    );
+    if (duplicate.rows.length > 0) {
+      sendJson(res, 409, { ok: false, error: `Ticker ${ticker} is already present in the asset registry.` });
+      return;
+    }
+
+    const { accountRef, apiBase } = resolveWalletNodeContext(wallet);
+    const issuedAt = new Date();
+    const issuanceInsert = await query(
+      `
+        INSERT INTO rgb_asset_issuances (
+          wallet_id,
+          node_account_ref,
+          network,
+          schema,
+          token_name,
+          ticker,
+          precision,
+          total_supply,
+          liquidity_percentage,
+          reserved_asset_amount,
+          requested_channel_btc_sats,
+          channel_bootstrap_mode,
+          lifecycle_status,
+          status,
+          metadata
+        )
+        VALUES ($1, $2, 'regtest', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'issuing', $13::jsonb)
+        RETURNING id
+      `,
+      [
+        wallet.id,
+        accountRef,
+        schema,
+        tokenName,
+        ticker,
+        precision,
+        String(totalSupply),
+        normalizedLiquidityPercentage,
+        reservedAssetAmount > 0 ? String(reservedAssetAmount) : null,
+        requestedChannelBtcSats,
+        channelBootstrapMode,
+        initialLifecycleStatus,
+        JSON.stringify({
+          requestedAt: issuedAt.toISOString(),
+          description: description || null,
+          publicRegistry,
+          bootstrapPlan: {
+            enabled: bootstrapLightning,
+            liquidityPercentage: normalizedLiquidityPercentage,
+            reservedAssetAmount,
+            requestedChannelBtcSats,
+            channelFundingTiming: channelBootstrapMode,
+            lifecycleStatus: initialLifecycleStatus,
+          },
+        }),
+      ]
+    );
+    const issuanceId = issuanceInsert.rows[0].id;
+
+    try {
+      await ensureRgbUtxos(apiBase);
+      const issueResult = await rgbNodeRequestWithBase(apiBase, '/issueassetnia', {
+        ticker,
+        name: tokenName,
+        amounts: [Math.trunc(totalSupply)],
+        precision,
+        ...(description ? { details: description } : {}),
+      });
+
+      const asset = issueResult?.asset || issueResult || {};
+      const contractId =
+        (typeof asset.asset_id === 'string' && asset.asset_id.trim()) ||
+        (typeof asset.assetId === 'string' && asset.assetId.trim()) ||
+        null;
+      if (!contractId) {
+        throw new Error('RGB node did not return an asset id for the issued asset.');
+      }
+
+      const issuedSupply =
+        asset.issued_supply !== undefined && asset.issued_supply !== null
+          ? String(asset.issued_supply)
+          : String(totalSupply);
+      const schemaId = typeof asset.schema_id === 'string' ? asset.schema_id : null;
+      let bootstrapApplication = null;
+      let effectiveLifecycleStatus = initialLifecycleStatus;
+      let bootstrapErrorMessage = null;
+
+      if (bootstrapLightning && reservedAssetAmount > 0 && requestedChannelBtcSats) {
+        try {
+          bootstrapApplication = await createPrimaryBootstrapChannelApplication({
+            wallet,
+            accountRef,
+            assetId: contractId,
+            assetAmount: reservedAssetAmount,
+            issuanceId,
+            issuedAt,
+            requestedChannelBtcSats,
+            channelFundingTiming: channelBootstrapMode,
+            readiness,
+          });
+
+          if (bootstrapApplication?.channel_id || bootstrapApplication?.status === 'channel_active') {
+            effectiveLifecycleStatus = 'lightning_ready';
+          } else if ((bootstrapApplication?.btc_deposit_status || '') === 'confirmed') {
+            effectiveLifecycleStatus = 'waiting_primary_channel';
+          } else {
+            effectiveLifecycleStatus = 'waiting_btc_channel_funding';
+          }
+        } catch (bootstrapError) {
+          bootstrapErrorMessage = bootstrapError.message;
+          effectiveLifecycleStatus = 'bootstrap_failed';
+          console.error(`[${nowIso()}] [RGB API] Primary bootstrap setup failed:`, bootstrapError.message);
+        }
+      }
+
+      const walletAssetId = await withTransaction(async (client) => {
+        await client.query(
+          `
+            UPDATE rgb_asset_issuances
+            SET
+              contract_id = $2,
+              status = 'issued',
+              lifecycle_status = $4,
+              primary_channel_id = $5,
+              last_error = $6,
+              metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            issuanceId,
+            contractId,
+            JSON.stringify({
+              issuedAt: issuedAt.toISOString(),
+              nodeResponse: issueResult || {},
+              bootstrapChannelApplicationId: bootstrapApplication?.id || null,
+              bootstrapChannelStatus: bootstrapApplication?.status || null,
+              bootstrapChannelId: bootstrapApplication?.channel_id || null,
+              bootstrapError: bootstrapErrorMessage,
+            }),
+            effectiveLifecycleStatus,
+            bootstrapApplication?.channel_id || null,
+            bootstrapErrorMessage,
+          ]
+        );
+
+        if (publicRegistry) {
+          await client.query(
+            `
+              INSERT INTO asset_registry (
+                network,
+                token_name,
+                ticker,
+                total_supply,
+                precision,
+                issuer_ref,
+                creation_date,
+                block_height,
+                contract_id,
+                schema_id,
+                metadata
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+              ON CONFLICT (contract_id)
+              DO UPDATE SET
+                token_name = EXCLUDED.token_name,
+                ticker = EXCLUDED.ticker,
+                total_supply = EXCLUDED.total_supply,
+                precision = EXCLUDED.precision,
+                issuer_ref = EXCLUDED.issuer_ref,
+                creation_date = EXCLUDED.creation_date,
+                block_height = EXCLUDED.block_height,
+                schema_id = EXCLUDED.schema_id,
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()
+            `,
+            [
+              'regtest',
+              tokenName,
+              ticker,
+              issuedSupply,
+              precision,
+              wallet.wallet_key,
+              issuedAt.toISOString().slice(0, 10),
+              await rpcRequest('getblockcount'),
+              contractId,
+              schemaId,
+              JSON.stringify({
+                description: description || null,
+                display_color: pickIssuedAssetColor(ticker),
+                issuance_id: issuanceId,
+                issued_by_wallet_key: wallet.wallet_key,
+              }),
+            ]
+          );
+        }
+
+        const walletAssetResult = await client.query(
+          `
+            INSERT INTO wallet_assets (
+              wallet_id, asset_id, asset_schema, ticker, name, precision, contract_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (wallet_id, asset_id)
+            DO UPDATE SET
+              asset_schema = EXCLUDED.asset_schema,
+              ticker = COALESCE(EXCLUDED.ticker, wallet_assets.ticker),
+              name = EXCLUDED.name,
+              precision = EXCLUDED.precision,
+              contract_id = COALESCE(EXCLUDED.contract_id, wallet_assets.contract_id)
+            RETURNING id
+          `,
+          [wallet.id, contractId, 'Nia', ticker, tokenName, precision, contractId]
+        );
+        const walletAssetId = walletAssetResult.rows[0].id;
+
+        const existingIssuanceTransfer = await client.query(
+          `
+            SELECT id
+            FROM rgb_transfers
+            WHERE wallet_id = $1
+              AND wallet_asset_id = $2
+              AND transfer_kind = 'Issuance'
+              AND metadata->>'contract_id' = $3
+            LIMIT 1
+          `,
+          [wallet.id, walletAssetId, contractId]
+        );
+
+        if (existingIssuanceTransfer.rows.length === 0) {
+          await client.query(
+            `
+              INSERT INTO rgb_transfers (
+                wallet_id,
+                wallet_asset_id,
+                direction,
+                transfer_kind,
+                status,
+                requested_assignment_type,
+                requested_assignment_value,
+                settled_amount,
+                settled_at,
+                metadata
+              )
+              VALUES ($1, $2, 'incoming', 'Issuance', 'Settled', 'Fungible', $3, $3, $4, $5::jsonb)
+            `,
+            [
+              wallet.id,
+              walletAssetId,
+              issuedSupply,
+              issuedAt,
+              JSON.stringify({
+                route: 'issuance',
+                contract_id: contractId,
+                issuance_id: issuanceId,
+                schema: 'NIA',
+                ticker,
+                bootstrap_lifecycle_status: effectiveLifecycleStatus,
+              }),
+            ]
+          );
+        }
+
+        await client.query(
+          `
+            INSERT INTO transfer_events (
+              wallet_id,
+              invoice_id,
+              event_type,
+              event_source,
+              payload
+            )
+            VALUES ($1, NULL, 'rgb_asset_issued', 'wallet_api', $2::jsonb)
+          `,
+          [
+            wallet.id,
+            JSON.stringify({
+              issuanceId,
+              contractId,
+              ticker,
+              totalSupply: issuedSupply,
+              nodeAccountRef: accountRef,
+              publicRegistry,
+              bootstrapPlan: {
+                enabled: bootstrapLightning,
+                liquidityPercentage: normalizedLiquidityPercentage,
+                reservedAssetAmount,
+                requestedChannelBtcSats,
+                channelFundingTiming: channelBootstrapMode,
+                lifecycleStatus: effectiveLifecycleStatus,
+                channelApplicationId: bootstrapApplication?.id || null,
+                channelId: bootstrapApplication?.channel_id || null,
+                error: bootstrapErrorMessage,
+              },
+            }),
+          ]
+        );
+
+        return walletAssetId;
+      });
+
+      const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId: contractId });
+      const transfers = await syncWalletTransferRows(wallet, contractId, synced.walletAsset.id);
+      await syncWalletLightningPayments(wallet, contractId, synced.walletAsset.id);
+      await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
+
+      const balance = synced.asset?.balance
+        ? normalizeLiveRgbBalance(synced.asset.balance)
+        : await deriveWalletScopedBalance(synced.walletAsset.id);
+      await upsertWalletAssetBalance(synced.walletAsset.id, balance);
+
+      sendJson(res, 200, {
+        ok: true,
+        walletKey: wallet.wallet_key,
+        ownerWalletKey: wallet.wallet_key,
+        ownerNodeAccountRef: accountRef,
+        issuanceId,
+        registryListed: publicRegistry,
+        asset: {
+          token_name: tokenName,
+          ticker,
+          total_supply: issuedSupply,
+          precision,
+          issuer_ref: wallet.wallet_key,
+          creation_date: issuedAt.toISOString().slice(0, 10),
+          block_height: null,
+          contract_id: contractId,
+          schema_id: schemaId,
+        },
+        ownership: {
+          walletKey: wallet.wallet_key,
+          nodeAccountRef: accountRef,
+          initialSupplyAssigned: issuedSupply,
+        },
+        bootstrapPlan: {
+          enabled: bootstrapLightning,
+          liquidityPercentage: normalizedLiquidityPercentage,
+          reservedAssetAmount,
+          requestedChannelBtcSats,
+          channelFundingTiming: channelBootstrapMode,
+          lifecycleStatus: effectiveLifecycleStatus,
+          channelApplicationId: bootstrapApplication?.id || null,
+          channelId: bootstrapApplication?.channel_id || null,
+          error: bootstrapErrorMessage,
+        },
+      });
+    } catch (issueError) {
+      await query(
+        `
+          UPDATE rgb_asset_issuances
+          SET
+            status = 'failed',
+            last_error = $3,
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          issuanceId,
+          JSON.stringify({
+            failedAt: new Date().toISOString(),
+            error: issueError.message,
+          }),
+          issueError.message,
+        ]
+      );
+      throw issueError;
+    }
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Asset issuance failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
 async function handleRgbRegistryTransfers(res, parsedUrl) {
   const assetId = parsedUrl.searchParams.get('assetId');
   if (!assetId) {
@@ -2937,6 +4867,12 @@ async function handleRgbRegistryTransfers(res, parsedUrl) {
   }
 
   try {
+    const registryState = await getRegistryAssetState(assetId);
+    if (registryState?.archived) {
+      sendJson(res, 410, { ok: false, error: `RGB asset ${registryState.ticker || registryState.tokenName || assetId} is archived.` });
+      return;
+    }
+
     const [registryResult, transferResult] = await Promise.all([
       query(
         `
@@ -2970,8 +4906,73 @@ async function handleRgbRegistryTransfers(res, parsedUrl) {
   }
 }
 
+async function handleRgbArchiveAsset(req, res) {
+  if (!requireAdminSession(req, res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const assetId = typeof body.assetId === 'string' && body.assetId.trim() ? body.assetId.trim() : '';
+  if (!assetId) {
+    sendJson(res, 400, { ok: false, error: 'assetId is required.' });
+    return;
+  }
+
+  const archived = body.archived !== undefined ? Boolean(body.archived) : true;
+  const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : null;
+
+  try {
+    const result = await query(
+      `
+        UPDATE asset_registry
+        SET
+          metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+          updated_at = NOW()
+        WHERE contract_id = $1
+        RETURNING token_name, ticker, contract_id, metadata
+      `,
+      [
+        assetId,
+        JSON.stringify({
+          archived,
+          archived_at: new Date().toISOString(),
+          archive_reason: reason,
+        }),
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      sendJson(res, 404, { ok: false, error: 'Asset not found in registry.' });
+      return;
+    }
+
+    const row = result.rows[0];
+    sendJson(res, 200, {
+      ok: true,
+      asset: {
+        token_name: row.token_name,
+        ticker: row.ticker,
+        contract_id: row.contract_id,
+        archived: isArchivedRegistryMetadata(row.metadata),
+      },
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Archive asset failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
 async function ensureState() {
   await fsp.mkdir(DATA_DIR, { recursive: true });
+  await ensureRgbNodeRegistrySeeded();
+  await ensureBoardSupportSeeded();
   try {
     const raw = await fsp.readFile(CLAIMS_PATH, 'utf8');
     const parsed = JSON.parse(raw);
@@ -3400,9 +5401,10 @@ async function handleBtcUsdPrice(res) {
 }
 
 async function handleRgbHealth(res) {
+  const issuerApiBase = resolveRgbNodeApiBaseForAccountRef(RGB_OWNER_ACCOUNT_REF);
   try {
     console.log(`[${nowIso()}] [RGB API] Health check requested`);
-    const info = await fetch(`${RGB_NODE_API_BASE}/networkinfo`);
+    const info = await fetch(`${issuerApiBase}/networkinfo`);
     if (!info.ok) {
       throw new Error(`RGB node responded with status ${info.status}`);
     }
@@ -3410,7 +5412,7 @@ async function handleRgbHealth(res) {
     console.log(`[${nowIso()}] [RGB API] Health check succeeded`, payload);
     sendJson(res, 200, {
       ok: true,
-      rgbNodeApiBase: RGB_NODE_API_BASE,
+      rgbNodeApiBase: issuerApiBase,
       ...payload,
     });
   } catch (error) {
@@ -3418,7 +5420,7 @@ async function handleRgbHealth(res) {
     sendJson(res, 503, {
       ok: false,
       error: error.message,
-      rgbNodeApiBase: RGB_NODE_API_BASE,
+      rgbNodeApiBase: issuerApiBase,
     });
   }
 }
@@ -3454,6 +5456,9 @@ async function handleRgbInvoice(req, res) {
   }
 
   try {
+    if (assetId) {
+      await assertAssetNotArchived(assetId);
+    }
     const wallet = await ensureWalletWithFunding(req, getRequestNetwork(body));
     const { apiBase: walletApiBase } = resolveWalletNodeContext(wallet);
     const payload = {
@@ -3582,11 +5587,15 @@ async function handleRgbInvoice(req, res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] RGB invoice generation failed:`, error.message);
-    sendJson(res, 502, { ok: false, error: error.message });
+    sendJson(res, error.statusCode || 502, { ok: false, error: error.message });
   }
 }
 
 async function handleRgbOpenChannel(req, res) {
+  if (!requireAdminSession(req, res)) {
+    return;
+  }
+
   let body;
   try {
     body = await readRequestJson(req);
@@ -3614,8 +5623,8 @@ async function handleRgbOpenChannel(req, res) {
   const feeProportionalMillionths =
     body.feeProportionalMillionths === undefined ? 0 : Number(body.feeProportionalMillionths);
 
-  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
-    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
     return;
   }
 
@@ -3837,6 +5846,10 @@ async function maybeAutoOpenChannelApplication(applicationLike) {
 }
 
 async function handleRgbOpenChannelCheck(req, res, parsedUrl) {
+  if (!requireAdminSession(req, res)) {
+    return;
+  }
+
   const accountRef =
     typeof parsedUrl.searchParams.get('accountRef') === 'string' && parsedUrl.searchParams.get('accountRef').trim()
       ? parsedUrl.searchParams.get('accountRef').trim()
@@ -3849,8 +5862,8 @@ async function handleRgbOpenChannelCheck(req, res, parsedUrl) {
   const assetAmount = Number(parsedUrl.searchParams.get('assetAmount') || 0);
   const feeReserveSat = 2500;
 
-  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
-    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
     return;
   }
 
@@ -3913,6 +5926,163 @@ async function handleRgbOpenChannelCheck(req, res, parsedUrl) {
   }
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function restartDockerContainer(container) {
+  const { stdout, stderr } = await execFileAsync('docker', ['restart', container], {
+    timeout: 30000,
+  });
+  return {
+    stdout: typeof stdout === 'string' ? stdout.trim() : '',
+    stderr: typeof stderr === 'string' ? stderr.trim() : '',
+  };
+}
+
+function buildRgbNodeUnlockPayload(accountRef, password) {
+  const defaults = RGB_NODE_UNLOCK_DEFAULTS[accountRef] || {};
+  const resolvedPassword =
+    typeof password === 'string' && password.trim() ? password.trim() : defaults.password;
+
+  if (!resolvedPassword) {
+    return null;
+  }
+
+  return {
+    password: resolvedPassword,
+    bitcoind_rpc_username: RPC_USER,
+    bitcoind_rpc_password: RPC_PASSWORD,
+    bitcoind_rpc_host: 'photon-bitcoind',
+    bitcoind_rpc_port: RPC_PORT,
+    indexer_url: 'tcp://photon-electrs:50001',
+    proxy_endpoint: 'rpc://photon-rgb-proxy:3000/json-rpc',
+    announce_addresses: [],
+    announce_alias: defaults.announceAlias || accountRef,
+  };
+}
+
+async function unlockRgbNode(accountRef, password = '') {
+  const payload = buildRgbNodeUnlockPayload(accountRef, password);
+  if (!payload) {
+    return {
+      attempted: false,
+      ok: false,
+      skipped: true,
+      message:
+        'No unlock password configured for this node. Set the matching RGB_*_NODE_PASSWORD environment variable before restarting or unlocking it.',
+    };
+  }
+
+  const apiBase = resolveRgbNodeApiBaseForAccountRef(accountRef);
+  try {
+    const response = await rgbNodeRequestWithBase(apiBase, '/unlock', payload);
+    return {
+      attempted: true,
+      ok: true,
+      response,
+      message: 'Node unlocked.',
+    };
+  } catch (error) {
+    if (String(error.message || '').includes('already been unlocked')) {
+      return {
+        attempted: true,
+        ok: true,
+        alreadyUnlocked: true,
+        message: 'Node was already unlocked.',
+      };
+    }
+    throw error;
+  }
+}
+
+async function handleAdminRgbNodeControl(req, res) {
+  if (!requireAdminSession(req, res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const target = typeof body.target === 'string' && body.target.trim() ? body.target.trim() : '';
+  const action = typeof body.action === 'string' && body.action.trim() ? body.action.trim() : '';
+  const unlockPassword =
+    typeof body.unlockPassword === 'string' && body.unlockPassword.trim()
+      ? body.unlockPassword.trim()
+      : '';
+  const targetConfig = RGB_NODE_CONTROL_TARGETS[target];
+
+  if (!targetConfig) {
+    sendJson(res, 400, {
+      ok: false,
+      error: `target must be one of: ${Object.keys(RGB_NODE_CONTROL_TARGETS).join(', ')}`,
+    });
+    return;
+  }
+
+  if (!['restart', 'refresh', 'restart-refresh'].includes(action)) {
+    sendJson(res, 400, {
+      ok: false,
+      error: 'action must be one of: restart, refresh, restart-refresh.',
+    });
+    return;
+  }
+
+  if (targetConfig.type !== 'rgb-node' && action !== 'restart') {
+    sendJson(res, 400, { ok: false, error: `${targetConfig.label} supports restart only.` });
+    return;
+  }
+
+  try {
+    let restart = null;
+    let refresh = null;
+    let unlock = null;
+
+    if (action === 'restart' || action === 'restart-refresh') {
+      restart = await restartDockerContainer(targetConfig.container);
+      if (targetConfig.type === 'rgb-node') {
+        await waitMs(1500);
+        unlock = await unlockRgbNode(targetConfig.accountRef, unlockPassword);
+      }
+    }
+
+    if (action === 'refresh' || action === 'restart-refresh') {
+      refresh = await rgbNodeRequestWithBase(
+        resolveRgbNodeApiBaseForAccountRef(targetConfig.accountRef),
+        '/refreshtransfers',
+        { skip_sync: false }
+      );
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      target: targetConfig.target,
+      label: targetConfig.label,
+      action,
+      container: targetConfig.container,
+      restart,
+      unlock,
+      refresh,
+      message:
+        action === 'restart-refresh'
+          ? `${targetConfig.label} restarted, unlocked, and transfer refresh triggered.`
+          : action === 'refresh'
+            ? `${targetConfig.label} transfer refresh triggered.`
+            : unlock?.skipped
+              ? `${targetConfig.label} restarted. Unlock still required.`
+              : `${targetConfig.label} restarted and unlocked.`,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [RGB API] Node control failed for ${target}:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
 async function handleRgbCloseChannel(req, res) {
   let body;
   try {
@@ -3930,8 +6100,8 @@ async function handleRgbCloseChannel(req, res) {
     typeof body.peerPubkey === 'string' && body.peerPubkey.trim() ? body.peerPubkey.trim() : '';
   const force = Boolean(body.force);
 
-  if (![RGB_OWNER_ACCOUNT_REF, RGB_USER_ACCOUNT_REF].includes(accountRef)) {
-    sendJson(res, 400, { ok: false, error: 'accountRef must be photon-rln-issuer or photon-rln-user.' });
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
     return;
   }
 
@@ -3966,6 +6136,294 @@ async function handleRgbCloseChannel(req, res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [RGB API] Close channel failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardStatusesGet(res) {
+  try {
+    const rows = await listBoardTicketStatuses();
+    sendJson(res, 200, {
+      ok: true,
+      statuses: rows.map((row) => ({
+        ticketId: row.ticket_id,
+        status: row.status,
+        updatedAt: row.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to load ticket statuses:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardStatusUpsert(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const ticketId = typeof body.ticketId === 'string' ? body.ticketId.trim() : '';
+  const status = typeof body.status === 'string' ? body.status.trim() : '';
+
+  if (!ticketId) {
+    sendJson(res, 400, { ok: false, error: 'ticketId is required.' });
+    return;
+  }
+
+  if (!['todo', 'progress', 'review', 'done'].includes(status)) {
+    sendJson(res, 400, { ok: false, error: 'status must be one of: todo, progress, review, done.' });
+    return;
+  }
+
+  try {
+    const row = await upsertBoardTicketStatus({ ticketId, status });
+    sendJson(res, 200, {
+      ok: true,
+      ticketId: row.ticket_id,
+      status: row.status,
+      updatedAt: row.updated_at,
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to update ticket status:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+function normalizeBoardTicketRow(row) {
+  return {
+    id: row.ticket_id,
+    title: row.title,
+    status: row.status,
+    priority: row.priority,
+    category: row.category,
+    estimate: row.estimate,
+    assignee: row.assignee,
+    desc: row.desc_html,
+    links: Array.isArray(row.links) ? row.links : [],
+    isCustom: true,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function plainTextToHtmlParagraphs(value) {
+  const blocks = String(value || '')
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  if (blocks.length === 0) {
+    return '<p>No description provided.</p>';
+  }
+
+  return blocks
+    .map((block) => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+async function handleBoardTicketsGet(res) {
+  try {
+    const rows = await listBoardTickets();
+    sendJson(res, 200, {
+      ok: true,
+      tickets: rows.map(normalizeBoardTicketRow),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to load custom tickets:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardTicketCreate(req, res) {
+  if (!requireBoardSession(req, res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const status = typeof body.status === 'string' ? body.status.trim() : 'todo';
+  const priority = typeof body.priority === 'string' ? body.priority.trim() : 'medium';
+  const category = typeof body.category === 'string' ? body.category.trim() : 'backend';
+  const estimate = typeof body.estimate === 'string' && body.estimate.trim() ? body.estimate.trim() : '1d';
+  const assignee = typeof body.assignee === 'string' && body.assignee.trim() ? body.assignee.trim() : '—';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  const links = Array.isArray(body.links)
+    ? body.links
+        .filter((entry) => entry && typeof entry.label === 'string' && typeof entry.href === 'string')
+        .map((entry) => ({ label: entry.label.trim(), href: entry.href.trim() }))
+        .filter((entry) => entry.label && entry.href)
+    : [];
+
+  if (!title) {
+    sendJson(res, 400, { ok: false, error: 'title is required.' });
+    return;
+  }
+
+  if (!['todo', 'progress', 'review', 'done'].includes(status)) {
+    sendJson(res, 400, { ok: false, error: 'status must be one of: todo, progress, review, done.' });
+    return;
+  }
+
+  if (!['high', 'medium', 'low'].includes(priority)) {
+    sendJson(res, 400, { ok: false, error: 'priority must be one of: high, medium, low.' });
+    return;
+  }
+
+  if (!['ui', 'android', 'node', 'token', 'research', 'backend', 'infra'].includes(category)) {
+    sendJson(res, 400, { ok: false, error: 'category is invalid.' });
+    return;
+  }
+
+  const numericIds = await listBoardTickets();
+  const highestExisting = numericIds
+    .map((row) => {
+      const match = String(row.ticket_id || '').match(/^PHO-(\d+)$/);
+      return match ? Number(match[1]) : 0;
+    })
+    .reduce((max, value) => Math.max(max, value), 20);
+  const ticketId = `PHO-${String(highestExisting + 1).padStart(3, '0')}`;
+
+  try {
+    const row = await createBoardTicket({
+      ticketId,
+      title,
+      status,
+      priority,
+      category,
+      estimate,
+      assignee,
+      descHtml: plainTextToHtmlParagraphs(description),
+      links,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      ticket: normalizeBoardTicketRow(row),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to create ticket:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardTicketUpdate(req, res, parsedUrl) {
+  if (!requireBoardSession(req, res)) {
+    return;
+  }
+
+  const ticketId = typeof parsedUrl.query.id === 'string' ? parsedUrl.query.id.trim() : '';
+  if (!ticketId) {
+    sendJson(res, 400, { ok: false, error: 'id is required.' });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const status = typeof body.status === 'string' ? body.status.trim() : 'todo';
+  const priority = typeof body.priority === 'string' ? body.priority.trim() : 'medium';
+  const category = typeof body.category === 'string' ? body.category.trim() : 'backend';
+  const estimate = typeof body.estimate === 'string' && body.estimate.trim() ? body.estimate.trim() : '1d';
+  const assignee = typeof body.assignee === 'string' && body.assignee.trim() ? body.assignee.trim() : '—';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  const links = Array.isArray(body.links)
+    ? body.links
+        .filter((entry) => entry && typeof entry.label === 'string' && typeof entry.href === 'string')
+        .map((entry) => ({ label: entry.label.trim(), href: entry.href.trim() }))
+        .filter((entry) => entry.label && entry.href)
+    : [];
+
+  if (!title) {
+    sendJson(res, 400, { ok: false, error: 'title is required.' });
+    return;
+  }
+
+  if (!['todo', 'progress', 'review', 'done'].includes(status)) {
+    sendJson(res, 400, { ok: false, error: 'status must be one of: todo, progress, review, done.' });
+    return;
+  }
+
+  if (!['high', 'medium', 'low'].includes(priority)) {
+    sendJson(res, 400, { ok: false, error: 'priority must be one of: high, medium, low.' });
+    return;
+  }
+
+  if (!['ui', 'android', 'node', 'token', 'research', 'backend', 'infra'].includes(category)) {
+    sendJson(res, 400, { ok: false, error: 'category is invalid.' });
+    return;
+  }
+
+  try {
+    const row = await updateBoardTicket({
+      ticketId,
+      title,
+      status,
+      priority,
+      category,
+      estimate,
+      assignee,
+      descHtml: plainTextToHtmlParagraphs(description),
+      links,
+    });
+    if (!row) {
+      sendJson(res, 404, { ok: false, error: 'Ticket not found.' });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      ticket: normalizeBoardTicketRow(row),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to update ticket:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardTicketDelete(req, res, parsedUrl) {
+  if (!requireBoardSession(req, res)) {
+    return;
+  }
+
+  const ticketId = typeof parsedUrl.query.id === 'string' ? parsedUrl.query.id.trim() : '';
+  if (!ticketId) {
+    sendJson(res, 400, { ok: false, error: 'id is required.' });
+    return;
+  }
+
+  try {
+    const deleted = await deleteBoardTicket(ticketId);
+    if (!deleted) {
+      sendJson(res, 404, { ok: false, error: 'Ticket not found.' });
+      return;
+    }
+    sendJson(res, 200, { ok: true, ticketId });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to delete ticket:`, error.message);
     sendJson(res, 502, { ok: false, error: error.message });
   }
 }
@@ -4187,6 +6645,7 @@ async function handleRgbFaucetClaim(req, res) {
         SELECT token_name, ticker, precision, contract_id
         FROM asset_registry
         WHERE contract_id = $1
+          AND COALESCE((metadata->>'archived')::boolean, FALSE) = FALSE
         LIMIT 1
       `,
       [assetId]
@@ -4348,6 +6807,21 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/rgb/issue-asset-readiness') {
+    await handleRgbIssueAssetReadiness(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/rgb/issue-asset') {
+    await handleRgbIssueAsset(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/rgb/archive-asset') {
+    await handleRgbArchiveAsset(req, res);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/rgb/ln-invoice') {
     await handleRgbLightningInvoice(req, res);
     return;
@@ -4440,6 +6914,69 @@ async function requestHandler(req, res) {
 
   if (req.method === 'GET' && pathname === '/api/rgb/channel-dashboard') {
     await handleRgbChannelDashboard(res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/board/statuses') {
+    await handleBoardStatusesGet(res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/board/status') {
+    await handleBoardStatusUpsert(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/board/tickets') {
+    await handleBoardTicketsGet(res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/board/tickets') {
+    await handleBoardTicketCreate(req, res);
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/board/tickets') {
+    await handleBoardTicketUpdate(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname === '/api/board/tickets') {
+    await handleBoardTicketDelete(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/admin/auth/challenge') {
+    await handleAdminAuthChallenge(res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/auth/verify') {
+    await handleAdminAuthVerify(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/auth/logout') {
+    await handleAdminAuthLogout(req, res);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/rgb/wallet-assignments') {
+    if (!requireAdminSession(req, res)) return;
+    await handleRgbWalletAssignments(res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/rgb/wallet-assign') {
+    if (!requireAdminSession(req, res)) return;
+    await handleRgbWalletAssignmentUpdate(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/rgb-node-control') {
+    if (!requireAdminSession(req, res)) return;
+    await handleAdminRgbNodeControl(req, res);
     return;
   }
 

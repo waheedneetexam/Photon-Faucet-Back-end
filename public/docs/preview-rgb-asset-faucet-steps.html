@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PhotonBolt Preview: RGB Asset Faucet Steps</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --card:#0f1c30; --muted:#9fb1c9; --line:#243550; --gold:#fbbf24; --text:#ecf4ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: Inter, system-ui, sans-serif; background:linear-gradient(180deg,#08111f,#0d1728); color:var(--text); }
+    main { max-width: 980px; margin: 0 auto; padding: 48px 20px 72px; }
+    h1,h2 { margin: 0 0 12px; }
+    p { color: var(--muted); line-height: 1.7; }
+    .hero,.card { background: rgba(15,28,48,.88); border:1px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.24); }
+    .hero { margin-bottom: 20px; }
+    .pill { display:inline-block; padding: 8px 12px; border-radius: 999px; background: rgba(251,191,36,.12); color: var(--gold); font-weight: 700; margin-bottom: 16px; }
+    .grid { display:grid; gap:16px; }
+    .step-title { color: var(--gold); font-weight: 700; margin-bottom: 8px; }
+    code { background:#08111f; border:1px solid var(--line); border-radius:8px; padding:2px 6px; color:#ffd978; }
+    a { color: #ffd978; text-decoration: none; }
+    ul { color: var(--muted); line-height: 1.7; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="pill">Preview Integration Guide</div>
+      <h1>RGB Asset Faucet Steps</h1>
+      <p>These steps explain how the public RGB faucet on <a href="https://faucet.photonbolt.xyz/rgb-faucet.html" target="_blank" rel="noopener noreferrer">faucet.photonbolt.xyz/rgb-faucet.html</a> fits into the PhotonBolt preview and wallet workflow.</p>
+    </section>
+    <section class="grid">
+      <div class="card"><div class="step-title">1. Fund the wallet with RegTest BTC first</div><p>Use the Bitcoin RegTest faucet before using the RGB faucet. The wallet needs BTC and RGB-ready UTXO state before more advanced RGB flows work reliably.</p></div>
+      <div class="card"><div class="step-title">2. Import the asset from the live registry</div><p>Open the live asset registry and import the contract into Photon Wallet. The preview site now supports direct wallet import from the registry when the extension is connected.</p></div>
+      <div class="card"><div class="step-title">3. Decode or paste the RGB invoice</div><p>The public RGB faucet can decode invoices and show the asset name from the registry even when the invoice itself only contains the contract identifier.</p></div>
+      <div class="card"><div class="step-title">4. Claim a supported faucet asset</div><p>Use the faucet claim flow only for assets that are actually funded in the faucet node inventory. Registry visibility alone does not mean the faucet can distribute the asset.</p></div>
+      <div class="card"><div class="step-title">5. Refresh Photon Wallet after settlement</div><p>After the faucet completes the claim, return to Photon Wallet and refresh the asset list so the live RGB node balance updates the spendable and pending amounts.</p><ul><li>If the asset is missing, import it from the registry first.</li><li>If pending values remain stale, use the RGB node refresh tools or wallet reload.</li></ul></div>
+    </section>
+  </main>
+</body>
+</html>

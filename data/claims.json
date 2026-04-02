@@ -1,55 +1,11 @@
 {
-  "claims": [],
-  "rgbClaims": [
+  "claims": [
     {
       "ip": "92.96.9.10",
-      "invoice": "lnbcrt30u1p5ust0ydqqnp4qflv00kq3v64mhlm5nkdvyj3rfvvuwhmfw3qpk564ps5r8n9hnztspp5yzdxp80pevxhr7r2sqffzzrhuwy4cy5auajghevpk6r93un4vfhqsp5uydddrk95g2hdvk07h7ye8tjff5tcvzysnc2d8lhx0acftf09anq9qyysgqcqzp2xqzdylp5mry9lxh8xsr2tqjnq0jfpy59l9ghtl97y05q6ljm5cegft5el6cq7qzlgm7hlnasva5rx2tyudjkg5sedw6qlttluhwlsnutrffl3x3aa5trqqdlgw3dr3flkcx5wgpk45uu8jwg2vw4nhd7gjzm3mhy7ge5xj8spa7wz9e",
-      "invoiceKind": "lightning",
-      "assetId": "rgb:2Mhfmuc0-BqWCUwP-kkJKF_V-F1~L4j6-A1_W6Yy-hK6Z~rA",
-      "assetAmount": 1000,
-      "timestamp": 1774726637725,
-      "txid": null,
-      "paymentHash": "209a609de1cb0d71f86a8012910877e3895c129de7648be581b68658f275626e"
-    },
-    {
-      "ip": "92.96.9.10",
-      "invoice": "lnbcrt30u1p5ust54dqqnp4qflv00kq3v64mhlm5nkdvyj3rfvvuwhmfw3qpk564ps5r8n9hnztspp5wxhnsvg9regjvq9zfjd3t4ztgdhrwnyx33cmptsalv0a3qh3ufkqsp5r2n932r0ss294njytfh9ez385v4va66vqcxr650kurddpt0cftcs9qyysgqcqzp2xqzdylp5mry9lxh8xsr2tqjnq0jfpy59l9ghtl97y05q6ljm5cegft5el6cq7qzlgfj3kf0vhdrzd60gsrdr9pt2vd73up254gj68vpcc7ar33x76jw283pkgwer0v3s58czdfcfkuan8dj06mp6ch4rphewlcfqv6nds56sp7e25zg",
-      "invoiceKind": "lightning",
-      "assetId": "rgb:2Mhfmuc0-BqWCUwP-kkJKF_V-F1~L4j6-A1_W6Yy-hK6Z~rA",
-      "assetAmount": 1000,
-      "timestamp": 1774726939316,
-      "txid": null,
-      "paymentHash": "71af3831051e512600a24c9b15d44b436e374c868c71b0ae1dfb1fd882f1e26c"
-    },
-    {
-      "ip": "92.96.9.10",
-      "invoice": "lnbcrt30u1p5ustlxdqqnp4qflv00kq3v64mhlm5nkdvyj3rfvvuwhmfw3qpk564ps5r8n9hnztspp5yl0pwjp3nhrsx85zj3z4hhwdglspdh64jpfqvmze35ww74cpg5gssp5ku2x9g3s09l47jmktavkjr8n3cnmnne27saz68x0yfhxlm7nppms9qyysgqcqzp2xqzdylp5mry9lxh8xsr2tqjnq0jfpy59l9ghtl97y05q6ljm5cegft5el6cq7qp24spgh35k53pcg543f4qjpjkfsjqq5d35myvdv8g7n6r2aaca8fh9jsgyxfzdv23mnz0802rqpf5r4a393tnu3p30ptr6a99magg9xxqqk2nj37",
-      "invoiceKind": "lightning",
-      "assetId": "rgb:2Mhfmuc0-BqWCUwP-kkJKF_V-F1~L4j6-A1_W6Yy-hK6Z~rA",
-      "assetAmount": 10,
-      "timestamp": 1774727149636,
-      "txid": null,
-      "paymentHash": "27de1748319dc7031e8294455bddcd47e016df559052066c598d1cef57014511"
-    },
-    {
-      "ip": "92.96.9.10",
-      "invoice": "lnbcrt30u1p5usvqqdqqnp4qflv00kq3v64mhlm5nkdvyj3rfvvuwhmfw3qpk564ps5r8n9hnztspp5dx4ft3t3qw0guyacdv0k3wft3whmrcey4rqmma6p2t6n7rulwmwqsp5dtgawvymm0stkvr7894fg6hnqpsq9shzlq5xspngulxle7hhvans9qyysgqcqzp2xqzdylp5mry9lxh8xsr2tqjnq0jfpy59l9ghtl97y05q6ljm5cegft5el6cq7qp2jcvn8cwr3cxjc5eswty3qynrh8x05xetr3xfa6k0xmt5lta522m4fsfx7lgtxxn7pn5e5gm7ue72xnp7nde3w3dt6je2dwnyyvcypccqgv6gu5",
-      "invoiceKind": "lightning",
-      "assetId": "rgb:2Mhfmuc0-BqWCUwP-kkJKF_V-F1~L4j6-A1_W6Yy-hK6Z~rA",
-      "assetAmount": 10,
-      "timestamp": 1774727175057,
-      "txid": null,
-      "paymentHash": "69aa95c571039e8e13b86b1f68b92b8bafb1e324a8c1bdf74152f53f0f9f76dc"
-    },
-    {
-      "ip": "92.96.9.10",
-      "invoice": "lnbcrt30u1p5usvytdqqnp4qflv00kq3v64mhlm5nkdvyj3rfvvuwhmfw3qpk564ps5r8n9hnztspp59892p2cdeq5az28970v752qk2v8tsqhxanh4kr4gpg72r4mam7mssp5jwm8vjghr443nkwnhh0xt90xlg8rlnleyql8f5z4zaazajy8umas9qyysgqcqzp2xqzdylp5mry9lxh8xsr2tqjnq0jfpy59l9ghtl97y05q6ljm5cegft5el6cq7qzlgw4tp9q57lcu3ypj75e8gr29dc73taa59cpu2y4r5wxczlwhsp6c5y9eygntpnu4sv73lnvn3new24uw82j2fu4kgpa4n58lntj0a9hqpqg5qx4",
-      "invoiceKind": "lightning",
-      "assetId": "rgb:2Mhfmuc0-BqWCUwP-kkJKF_V-F1~L4j6-A1_W6Yy-hK6Z~rA",
-      "assetAmount": 1000,
-      "timestamp": 1774727316054,
-      "txid": null,
-      "paymentHash": "29caa0ab0dc829d128e5f3d9ea2816530eb802e6ecef5b0ea80a3ca1d77ddfb7"
+      "address": "bcrt1pfqe9mm3t3cm0n4f5c0dh6pqlchydr5vggav5rx66r0g5uwlxqh2q0g7ysn",
+      "timestamp": 1775118269555,
+      "txid": "4f790c35f87a618c7b8fe978decc6e1c09b45e6e3860d85e8cdee2e7ebe47eb5"
     }
-  ]
+  ],
+  "rgbClaims": []
 }
