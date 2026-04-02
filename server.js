@@ -44,6 +44,7 @@ const {
   ensureBoardTicketStatusesTable,
   listBoardTicketStatuses,
   upsertBoardTicketStatus,
+  deleteBoardTicketStatus,
   ensureBoardTicketsTable,
   listBoardTickets,
   createBoardTicket,
@@ -6335,6 +6336,7 @@ async function handleBoardTicketCreate(req, res) {
       descHtml: plainTextToHtmlParagraphs(description),
       links,
     });
+    await upsertBoardTicketStatus({ ticketId, status });
     sendJson(res, 200, {
       ok: true,
       ticket: normalizeBoardTicketRow(row),
@@ -6350,7 +6352,8 @@ async function handleBoardTicketUpdate(req, res, parsedUrl) {
     return;
   }
 
-  const ticketId = typeof parsedUrl.query.id === 'string' ? parsedUrl.query.id.trim() : '';
+  const ticketId =
+    typeof parsedUrl.searchParams.get('id') === 'string' ? parsedUrl.searchParams.get('id').trim() : '';
   if (!ticketId) {
     sendJson(res, 400, { ok: false, error: 'id is required.' });
     return;
@@ -6414,6 +6417,7 @@ async function handleBoardTicketUpdate(req, res, parsedUrl) {
       sendJson(res, 404, { ok: false, error: 'Ticket not found.' });
       return;
     }
+    await upsertBoardTicketStatus({ ticketId, status });
     sendJson(res, 200, {
       ok: true,
       ticket: normalizeBoardTicketRow(row),
@@ -6429,7 +6433,8 @@ async function handleBoardTicketDelete(req, res, parsedUrl) {
     return;
   }
 
-  const ticketId = typeof parsedUrl.query.id === 'string' ? parsedUrl.query.id.trim() : '';
+  const ticketId =
+    typeof parsedUrl.searchParams.get('id') === 'string' ? parsedUrl.searchParams.get('id').trim() : '';
   if (!ticketId) {
     sendJson(res, 400, { ok: false, error: 'id is required.' });
     return;
@@ -6441,6 +6446,7 @@ async function handleBoardTicketDelete(req, res, parsedUrl) {
       sendJson(res, 404, { ok: false, error: 'Ticket not found.' });
       return;
     }
+    await deleteBoardTicketStatus(ticketId);
     sendJson(res, 200, { ok: true, ticketId });
   } catch (error) {
     console.error(`[${nowIso()}] [BOARD API] Failed to delete ticket:`, error.message);

@@ -716,6 +716,17 @@ async function upsertBoardTicketStatus({ ticketId, status }) {
   return result.rows[0] || null;
 }
 
+async function deleteBoardTicketStatus(ticketId) {
+  await ensureBoardTicketStatusesTable();
+  const result = await query(
+    `DELETE FROM board_ticket_statuses
+     WHERE ticket_id = $1
+     RETURNING ticket_id`,
+    [ticketId]
+  );
+  return result.rows[0] || null;
+}
+
 async function ensureBoardTicketsTable() {
   await query(`
     CREATE TABLE IF NOT EXISTS board_tickets (
@@ -735,22 +746,25 @@ async function ensureBoardTicketsTable() {
 }
 
 async function listBoardTickets() {
+  await ensureBoardTicketStatusesTable();
   await ensureBoardTicketsTable();
   const result = await query(
     `SELECT
-       ticket_id,
-       title,
-       status,
-       priority,
-       category,
-       estimate,
-       assignee,
-       desc_html,
-       links,
-       created_at,
-       updated_at
-     FROM board_tickets
-     ORDER BY ticket_id ASC`
+       bt.ticket_id,
+       bt.title,
+       COALESCE(bts.status, bt.status) AS status,
+       bt.priority,
+       bt.category,
+       bt.estimate,
+       bt.assignee,
+       bt.desc_html,
+       bt.links,
+       bt.created_at,
+       GREATEST(bt.updated_at, COALESCE(bts.updated_at, bt.updated_at)) AS updated_at
+     FROM board_tickets bt
+     LEFT JOIN board_ticket_statuses bts
+       ON bts.ticket_id = bt.ticket_id
+     ORDER BY bt.ticket_id ASC`
   );
   return result.rows;
 }
@@ -884,6 +898,7 @@ module.exports = {
   ensureBoardTicketStatusesTable,
   listBoardTicketStatuses,
   upsertBoardTicketStatus,
+  deleteBoardTicketStatus,
   ensureBoardTicketsTable,
   listBoardTickets,
   createBoardTicket,
