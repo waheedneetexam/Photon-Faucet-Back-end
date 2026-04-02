@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotonBolt Regtest Bootstrap Scripts</title>
+  <link rel="stylesheet" href="/docs.css?v=20260327a" />
+</head>
+<body>
+  <div class="docs-shell">
+    <header class="docs-header">
+      <p class="eyebrow">PhotonBolt Docs</p>
+      <h1>Regtest Bootstrap Scripts</h1>
+      <p class="lede">
+        These scripts help PhotonBolt operators bootstrap regtest RGB Lightning nodes using one
+        shared set of PHO and mining defaults instead of repeating them in multiple places.
+      </p>
+    </header>
+
+    <main class="docs-layout">
+      <section class="docs-card">
+        <h2>1. What these scripts are</h2>
+        <ul>
+          <li><code>scripts/photon-regtest-defaults.sh</code>: shared regtest constants for local operator scripts.</li>
+          <li><code>scripts/add-shared-rgb-node.sh</code>: interactive installer for adding one more shared RGB Lightning node.</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>2. photon-regtest-defaults.sh</h2>
+        <p>
+          This file is the script-level source of truth for regtest bootstrap values that used to
+          be repeated directly in installer scripts.
+        </p>
+        <p>It currently defines defaults for:</p>
+        <ul>
+          <li>Photon regtest Docker network name</li>
+          <li>issuer API base</li>
+          <li>bitcoind container name</li>
+          <li>regtest mining address</li>
+          <li>PHO asset contract id</li>
+          <li>PHO ticker and display name</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>3. add-shared-rgb-node.sh</h2>
+        <p>This script bootstraps a new shared user node into the PhotonBolt regtest environment.</p>
+        <ol>
+          <li>start a new RGB Lightning node container</li>
+          <li>initialize and unlock it</li>
+          <li>discover node pubkey and IP</li>
+          <li>connect the issuer node</li>
+          <li>open a PHO RGB channel</li>
+          <li>mine regtest blocks</li>
+          <li>wait for channel readiness</li>
+          <li>optionally register the node in the faucet backend registry</li>
+        </ol>
+      </section>
+
+      <section class="docs-card">
+        <h2>4. Why this was added</h2>
+        <ul>
+          <li>to stop PHO and mining-address drift across scripts</li>
+          <li>to make regtest bootstrap values easier to update safely</li>
+          <li>to keep the installer interactive while centralizing defaults</li>
+        </ul>
+      </section>
+
+      <section class="docs-card">
+        <h2>5. Example override</h2>
+        <pre><code>PHOTON_REGTEST_MINE_ADDRESS=bcrt1...
+PHOTON_REGTEST_PHO_ASSET_ID=rgb:...
+bash scripts/add-shared-rgb-node.sh</code></pre>
+        <p>
+          That lets operators override local values for one run without editing the tracked shared
+          defaults file.
+        </p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
