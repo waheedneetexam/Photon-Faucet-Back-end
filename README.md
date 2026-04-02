@@ -41,9 +41,28 @@ You can also place backend-only secrets in `faucet/.env`. Example:
 BINANCE_API_KEY=
 BINANCE_API_SECRET=
 BINANCE_API_BASE=https://api.binance.com
+RGB_NODE_API_BASE=http://127.0.0.1:3001
+RGB_LIGHTNING_NODE_API_BASE=http://127.0.0.1:3002
+RGB_LIGHTNING_NODE_B_API_BASE=http://127.0.0.1:3003
+RGB_PROXY_RPC_BASE=http://127.0.0.1:3000/json-rpc
+RGB_PUBLIC_PROXY_ENDPOINT=rpcs://dev-proxy.photonbolt.xyz/json-rpc
+PHOTON_ADMIN_WALLET_ADDRESS=
 ```
 
 The real `.env` file is ignored by git. Use `faucet/.env.example` as the template.
+
+### RGB endpoint configuration
+
+Regtest and local RGB infrastructure should be configured through environment variables instead of being treated as general production defaults.
+
+- `RGB_NODE_API_BASE`: issuer node API base
+- `RGB_LIGHTNING_NODE_API_BASE`: primary user RGB Lightning node API base
+- `RGB_LIGHTNING_NODE_B_API_BASE`: secondary user RGB Lightning node API base
+- `RGB_PROXY_RPC_BASE`: internal JSON-RPC base used by the backend
+- `RGB_PUBLIC_PROXY_ENDPOINT`: public proxy endpoint returned to clients
+- `PHOTON_ADMIN_WALLET_ADDRESS`: configured admin Photon wallet address for admin-auth pages
+
+If these values are omitted, the faucet keeps the current local regtest defaults. Set them explicitly in deployment to avoid mixing local dev assumptions with hosted environments.
 
 ## Run manually
 
