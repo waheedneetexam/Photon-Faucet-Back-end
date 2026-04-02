@@ -745,6 +745,21 @@ async function ensureBoardTicketsTable() {
   `);
 }
 
+async function ensureBoardTicketMergesTable() {
+  await ensureBoardTicketsTable();
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_ticket_merges (
+      source_ticket_id TEXT PRIMARY KEY,
+      target_ticket_id TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT board_ticket_merges_source_target_diff
+        CHECK (source_ticket_id <> target_ticket_id)
+    )
+  `);
+}
+
 async function listBoardTickets() {
   await ensureBoardTicketStatusesTable();
   await ensureBoardTicketsTable();
@@ -765,6 +780,54 @@ async function listBoardTickets() {
      LEFT JOIN board_ticket_statuses bts
        ON bts.ticket_id = bt.ticket_id
      ORDER BY bt.ticket_id ASC`
+  );
+  return result.rows;
+}
+
+async function listBoardTicketMerges() {
+  await ensureBoardTicketMergesTable();
+  const result = await query(
+    `SELECT source_ticket_id, target_ticket_id, note, created_at, updated_at
+     FROM board_ticket_merges
+     ORDER BY source_ticket_id ASC`
+  );
+  return result.rows;
+}
+
+async function upsertBoardTicketMerge({ sourceTicketId, targetTicketId, note = '' }) {
+  await ensureBoardTicketMergesTable();
+  const result = await query(
+    `INSERT INTO board_ticket_merges (source_ticket_id, target_ticket_id, note, created_at, updated_at)
+     VALUES ($1, $2, $3, NOW(), NOW())
+     ON CONFLICT (source_ticket_id)
+     DO UPDATE SET
+       target_ticket_id = EXCLUDED.target_ticket_id,
+       note = EXCLUDED.note,
+       updated_at = NOW()
+     RETURNING source_ticket_id, target_ticket_id, note, created_at, updated_at`,
+    [sourceTicketId, targetTicketId, String(note || '').trim()]
+  );
+  return result.rows[0] || null;
+}
+
+async function deleteBoardTicketMerge(sourceTicketId) {
+  await ensureBoardTicketMergesTable();
+  const result = await query(
+    `DELETE FROM board_ticket_merges
+     WHERE source_ticket_id = $1
+     RETURNING source_ticket_id`,
+    [sourceTicketId]
+  );
+  return result.rows[0] || null;
+}
+
+async function deleteBoardTicketMergesForTicket(ticketId) {
+  await ensureBoardTicketMergesTable();
+  const result = await query(
+    `DELETE FROM board_ticket_merges
+     WHERE source_ticket_id = $1 OR target_ticket_id = $1
+     RETURNING source_ticket_id, target_ticket_id`,
+    [ticketId]
   );
   return result.rows;
 }
@@ -900,8 +963,13 @@ module.exports = {
   upsertBoardTicketStatus,
   deleteBoardTicketStatus,
   ensureBoardTicketsTable,
+  ensureBoardTicketMergesTable,
   listBoardTickets,
+  listBoardTicketMerges,
   createBoardTicket,
   updateBoardTicket,
   deleteBoardTicket,
+  upsertBoardTicketMerge,
+  deleteBoardTicketMerge,
+  deleteBoardTicketMergesForTicket,
 };

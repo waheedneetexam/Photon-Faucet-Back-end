@@ -46,10 +46,15 @@ const {
   upsertBoardTicketStatus,
   deleteBoardTicketStatus,
   ensureBoardTicketsTable,
+  ensureBoardTicketMergesTable,
   listBoardTickets,
+  listBoardTicketMerges,
   createBoardTicket,
   updateBoardTicket,
   deleteBoardTicket,
+  upsertBoardTicketMerge,
+  deleteBoardTicketMerge,
+  deleteBoardTicketMergesForTicket,
 } = require('./db');
 
 const ROOT_DIR = __dirname;
@@ -6231,6 +6236,16 @@ function normalizeBoardTicketRow(row) {
   };
 }
 
+function normalizeBoardTicketMergeRow(row) {
+  return {
+    sourceTicketId: row.source_ticket_id,
+    targetTicketId: row.target_ticket_id,
+    note: row.note || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -6264,6 +6279,19 @@ async function handleBoardTicketsGet(res) {
     });
   } catch (error) {
     console.error(`[${nowIso()}] [BOARD API] Failed to load custom tickets:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardMergesGet(res) {
+  try {
+    const rows = await listBoardTicketMerges();
+    sendJson(res, 200, {
+      ok: true,
+      merges: rows.map(normalizeBoardTicketMergeRow),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to load ticket merges:`, error.message);
     sendJson(res, 502, { ok: false, error: error.message });
   }
 }
@@ -6446,12 +6474,80 @@ async function handleBoardTicketDelete(req, res, parsedUrl) {
       sendJson(res, 404, { ok: false, error: 'Ticket not found.' });
       return;
     }
+    await deleteBoardTicketMergesForTicket(ticketId);
     await deleteBoardTicketStatus(ticketId);
     sendJson(res, 200, { ok: true, ticketId });
   } catch (error) {
     console.error(`[${nowIso()}] [BOARD API] Failed to delete ticket:`, error.message);
     sendJson(res, 502, { ok: false, error: error.message });
   }
+}
+
+async function handleBoardMergeUpsert(req, res) {
+  if (!requireBoardSession(req, res)) {
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const sourceTicketId = typeof body.sourceTicketId === 'string' ? body.sourceTicketId.trim() : '';
+  const targetTicketId = typeof body.targetTicketId === 'string' ? body.targetTicketId.trim() : '';
+  const note = typeof body.note === 'string' ? body.note.trim() : '';
+
+  if (!sourceTicketId || !targetTicketId) {
+    sendJson(res, 400, { ok: false, error: 'sourceTicketId and targetTicketId are required.' });
+    return;
+  }
+
+  if (sourceTicketId === targetTicketId) {
+    sendJson(res, 400, { ok: false, error: 'source and target ticket IDs must differ.' });
+    return;
+  }
+
+  if (!/^PHO-\d+[A-Z]?$/i.test(sourceTicketId) || !/^PHO-\d+[A-Z]?$/i.test(targetTicketId)) {
+    sendJson(res, 400, { ok: false, error: 'Ticket IDs must look like PHO-040.' });
+    return;
+  }
+
+  try {
+    const row = await upsertBoardTicketMerge({ sourceTicketId, targetTicketId, note });
+    sendJson(res, 200, {
+      ok: true,
+      merge: normalizeBoardTicketMergeRow(row),
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [BOARD API] Failed to merge tickets:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
+}
+
+async function handleBoardMergeDelete(req, res, parsedUrl) {
+  if (!requireBoardSession(req, res)) {
+    return;
+  }
+
+  const sourceTicketId =
+    typeof parsedUrl.searchParams.get('sourceTicketId') === 'string'
+      ? parsedUrl.searchParams.get('sourceTicketId').trim()
+      : '';
+  if (!sourceTicketId) {
+    sendJson(res, 400, { ok: false, error: 'sourceTicketId is required.' });
+    return;
+  }
+
+  const deleted = await deleteBoardTicketMerge(sourceTicketId);
+  if (!deleted) {
+    sendJson(res, 404, { ok: false, error: 'Merged ticket not found.' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, sourceTicketId });
 }
 
 async function handleRgbInvoiceRegister(req, res) {
@@ -6958,13 +7054,28 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/board/merges') {
+    await handleBoardMergesGet(res);
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/board/tickets') {
     await handleBoardTicketCreate(req, res);
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/board/merge') {
+    await handleBoardMergeUpsert(req, res);
+    return;
+  }
+
   if (req.method === 'PUT' && pathname === '/api/board/tickets') {
     await handleBoardTicketUpdate(req, res, parsedUrl);
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname === '/api/board/merge') {
+    await handleBoardMergeDelete(req, res, parsedUrl);
     return;
   }
 
