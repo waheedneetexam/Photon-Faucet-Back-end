@@ -3969,6 +3969,43 @@ async function handleChannelApplicationCreate(req, res) {
       asset_amount: rgbAssetAmount,
     });
     const rgbInvoice = typeof invoiceResponse?.invoice === 'string' ? invoiceResponse.invoice.trim() : null;
+    if (!rgbInvoice) {
+      throw new Error('Unable to generate an RGB Lightning invoice for the requested node.');
+    }
+
+    // Persist the PLM invoice in rgb_invoices so same-node payments can be handled as internal transfers.
+    // (Otherwise executeRgbLightningPayment() cannot map the invoice to a receiver wallet.)
+    const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId: rgbAssetId });
+    const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice: rgbInvoice });
+    const expirationTimestamp =
+      Number.isFinite(Number(decoded?.timestamp)) && Number.isFinite(Number(decoded?.expiry_sec))
+        ? Number(decoded.timestamp) + Number(decoded.expiry_sec)
+        : null;
+    await recordRgbInvoice({
+      walletId: wallet.id,
+      walletAssetId: synced.walletAsset.id,
+      invoice: {
+        invoice: rgbInvoice,
+        recipient_id:
+          (typeof decoded?.payment_hash === 'string' && decoded.payment_hash.trim()) ||
+          (typeof invoiceResponse?.invoice_id === 'string' && invoiceResponse.invoice_id.trim()) ||
+          `ln:${randomUUID()}`,
+        recipient_type: 'LightningPaymentHash',
+        assignment: { type: 'Fungible', value: rgbAssetAmount },
+        expiration_timestamp: expirationTimestamp,
+        payment_hash: decoded?.payment_hash || null,
+        payee_pubkey: decoded?.payee_pubkey || null,
+        asset_id: decoded?.asset_id || rgbAssetId,
+        asset_amount: decoded?.asset_amount ?? rgbAssetAmount,
+        amt_msat: decoded?.amt_msat ?? 3000000,
+        expiry_sec: decoded?.expiry_sec ?? 3600,
+        timestamp: decoded?.timestamp || null,
+        account_ref: accountRef,
+        invoice_kind: 'lightning',
+      },
+      openAmount: false,
+      proxyEndpoint: null,
+    });
 
     const depositRequest = await createDepositRequest({
       walletId: wallet.id,
