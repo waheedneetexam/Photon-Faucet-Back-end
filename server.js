@@ -3975,7 +3975,25 @@ async function handleChannelApplicationCreate(req, res) {
 
     // Persist the PLM invoice in rgb_invoices so same-node payments can be handled as internal transfers.
     // (Otherwise executeRgbLightningPayment() cannot map the invoice to a receiver wallet.)
-    const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId: rgbAssetId });
+    const assetList = await rgbNodeRequestWithBase(apiBase, '/listassets', {
+      filter_asset_schemas: ['Nia', 'Uda', 'Cfa'],
+    });
+    const asset =
+      assetList?.nia?.find((entry) => entry.asset_id === rgbAssetId) ||
+      assetList?.uda?.find((entry) => entry.asset_id === rgbAssetId) ||
+      assetList?.cfa?.find((entry) => entry.asset_id === rgbAssetId);
+    if (!asset) {
+      throw new Error(`Asset ${rgbAssetId} was not found in the RGB wallet`);
+    }
+    const walletAsset = await upsertWalletAsset({
+      walletId: wallet.id,
+      assetId: asset.asset_id,
+      assetSchema: asset.asset_schema || 'Nia',
+      contractId: asset.asset_id,
+      name: asset.name,
+      ticker: asset.ticker || null,
+      precision: Number(asset.precision || 0),
+    });
     const decoded = await rgbNodeRequestWithBase(apiBase, '/decodelninvoice', { invoice: rgbInvoice });
     const expirationTimestamp =
       Number.isFinite(Number(decoded?.timestamp)) && Number.isFinite(Number(decoded?.expiry_sec))
@@ -3983,7 +4001,7 @@ async function handleChannelApplicationCreate(req, res) {
         : null;
     await recordRgbInvoice({
       walletId: wallet.id,
-      walletAssetId: synced.walletAsset.id,
+      walletAssetId: walletAsset.id,
       invoice: {
         invoice: rgbInvoice,
         recipient_id:
