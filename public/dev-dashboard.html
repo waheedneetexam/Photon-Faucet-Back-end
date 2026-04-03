@@ -6,7 +6,7 @@
   <title>PhotonBolt Dev Channel Dashboard</title>
   <meta name="description" content="PhotonBolt RGB Lightning channel liquidity and payment dashboard." />
   <link rel="stylesheet" href="/asset-registry.css?v=20260328l" />
-  <link rel="stylesheet" href="/dev-dashboard.css?v=20260329o" />
+  <link rel="stylesheet" href="/dev-dashboard.css?v=20260403a" />
 </head>
 <body>
   <div class="registry-shell">
@@ -254,6 +254,77 @@
           </tbody>
         </table>
       </div>
+    </section>
+
+    <section id="primary-channel-card" class="registry-card primary-channel-card hidden tab-panel-hidden" data-tab-panel="admin">
+      <div class="panel-header">
+        <div>
+          <h2>Create primary asset channel</h2>
+          <p class="registry-status form-note">
+            Admin-only bootstrap form for the first Lightning channel of an issued RGB asset. This creates the primary channel application that moves an asset from registry-only toward Lightning-ready.
+          </p>
+        </div>
+      </div>
+
+      <form id="primary-channel-form" class="open-channel-form primary-channel-form">
+        <label class="control-field">
+          <span>Wallet key</span>
+          <input id="primary-wallet-key" name="walletKey" type="text" list="primary-wallet-key-list" placeholder="extension-...-regtest" required />
+          <datalist id="primary-wallet-key-list"></datalist>
+        </label>
+        <label class="control-field">
+          <span>Node side</span>
+          <select id="primary-account-ref" name="accountRef">
+            <option value="photon-rln-user">User Node</option>
+            <option value="photon-rln-user-b">User Node B</option>
+            <option value="photon-rln-issuer">Issuer Node</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Asset ID</span>
+          <div class="field-with-action">
+            <input id="primary-asset-id" name="assetId" type="text" placeholder="rgb:..." required />
+            <button id="primary-asset-picker-button" class="page-btn action-btn inline-action-btn" type="button">Asset List</button>
+          </div>
+        </label>
+        <label class="control-field">
+          <span>Reserved asset amount</span>
+          <input id="primary-asset-amount" name="assetAmount" type="number" min="1" step="1" value="1000" required />
+        </label>
+        <label class="control-field">
+          <span>BTC funding (sats)</span>
+          <input id="primary-channel-funding-sats" name="channelFundingSats" type="number" min="1" step="1" value="32000" required />
+        </label>
+        <label class="control-field">
+          <span>Funding timing</span>
+          <select id="primary-channel-funding-timing" name="channelFundingTiming">
+            <option value="after_issuance">After issuance</option>
+            <option value="during_issuance">During issuance</option>
+          </select>
+        </label>
+        <div class="toolbar-actions open-channel-actions">
+          <button id="primary-channel-submit" class="page-btn action-btn action-btn-primary" type="submit">Create Primary Channel</button>
+        </div>
+      </form>
+
+      <div class="balance-check-panel primary-channel-result-grid">
+        <div class="detail-pill">
+          <span>Lifecycle</span>
+          <strong id="primary-channel-lifecycle">Waiting</strong>
+          <small id="primary-channel-readiness-detail" class="tiny-muted">Submit the form to create a primary channel application.</small>
+        </div>
+        <div class="detail-pill">
+          <span>Application</span>
+          <strong id="primary-channel-application-id">-</strong>
+          <small id="primary-channel-application-detail" class="tiny-muted">No application created yet.</small>
+        </div>
+        <div class="detail-pill">
+          <span>Channel</span>
+          <strong id="primary-channel-id">-</strong>
+          <small id="primary-channel-id-detail" class="tiny-muted">A channel ID appears after bootstrap opens the channel.</small>
+        </div>
+      </div>
+      <div id="primary-channel-status" class="registry-status" aria-live="polite"></div>
     </section>
 
     <section class="registry-card plm-application-card tab-panel-hidden" data-tab-panel="plm">
@@ -622,6 +693,6 @@
     </div>
   </div>
 
-  <script src="/dev-dashboard.js?v=20260329o" defer></script>
+  <script src="/dev-dashboard.js?v=20260403a" defer></script>
 </body>
 </html>

@@ -4202,7 +4202,11 @@ async function buildRgbIssueAssetReadiness(wallet, options = {}) {
   const channelFundingTiming = typeof options.channelFundingTiming === 'string'
     ? options.channelFundingTiming
     : 'after_issuance';
-  const { accountRef } = resolveWalletNodeContext(wallet);
+  const accountRefOverride = typeof options.accountRefOverride === 'string' ? options.accountRefOverride.trim() : '';
+  const { accountRef: resolvedAccountRef } = resolveWalletNodeContext(wallet);
+  const accountRef = accountRefOverride && isKnownRgbAccountRef(accountRefOverride)
+    ? accountRefOverride
+    : resolvedAccountRef;
   const addresses = await getWalletAddresses(wallet.id);
   const utxoFundingAddress = addresses?.utxo_funding_address || wallet.utxo_funding_address || null;
   const addressStats = utxoFundingAddress ? await buildAddressStats(utxoFundingAddress) : null;
@@ -4275,6 +4279,7 @@ async function createPrimaryBootstrapChannelApplication({
   requestedChannelBtcSats,
   channelFundingTiming,
   readiness,
+  applicationSource = 'issuance_bootstrap',
 }) {
   await ensureChannelApplicationsTable();
   const peerAccountRef = getPrimaryBootstrapPeerAccountRef(accountRef);
@@ -4333,7 +4338,7 @@ async function createPrimaryBootstrapChannelApplication({
     depositRequestId: depositRequest?.id || null,
     metadata: {
       network: 'regtest',
-      applicationSource: 'issuance_bootstrap',
+      applicationSource,
       issuanceId,
       createdFromIssuanceAt: issuedAt.toISOString(),
       peerAccountRef,
@@ -4344,6 +4349,144 @@ async function createPrimaryBootstrapChannelApplication({
 
   const hydrated = await maybeAutoOpenChannelApplication(application);
   return hydrated || application;
+}
+
+async function handleAdminPrimaryChannelBootstrap(req, res) {
+  let body;
+  try {
+    body = await readRequestJson(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+    return;
+  }
+
+  const walletKey = typeof body.walletKey === 'string' ? body.walletKey.trim() : '';
+  const accountRef = typeof body.accountRef === 'string' ? body.accountRef.trim() : '';
+  const assetId = typeof body.assetId === 'string' ? body.assetId.trim() : '';
+  const channelFundingTiming = typeof body.channelFundingTiming === 'string'
+    ? body.channelFundingTiming.trim()
+    : 'after_issuance';
+  const requestedChannelBtcSats = Math.max(0, Math.trunc(Number(body.channelFundingSats || 0)));
+  const assetAmount = Math.max(0, Math.trunc(Number(body.assetAmount || 0)));
+
+  if (!walletKey) {
+    sendJson(res, 400, { ok: false, error: 'walletKey is required.' });
+    return;
+  }
+
+  if (!isKnownRgbAccountRef(accountRef)) {
+    sendJson(res, 400, { ok: false, error: getRgbAccountRefError() });
+    return;
+  }
+
+  if (!assetId) {
+    sendJson(res, 400, { ok: false, error: 'assetId is required.' });
+    return;
+  }
+
+  if (!Number.isInteger(assetAmount) || assetAmount <= 0) {
+    sendJson(res, 400, { ok: false, error: 'assetAmount must be a positive integer.' });
+    return;
+  }
+
+  if (!Number.isInteger(requestedChannelBtcSats) || requestedChannelBtcSats <= 0) {
+    sendJson(res, 400, { ok: false, error: 'channelFundingSats must be a positive integer.' });
+    return;
+  }
+
+  if (channelFundingTiming !== 'during_issuance' && channelFundingTiming !== 'after_issuance') {
+    sendJson(res, 400, { ok: false, error: 'channelFundingTiming must be during_issuance or after_issuance.' });
+    return;
+  }
+
+  try {
+    const existing = await query(
+      `
+        SELECT
+          id,
+          wallet_key,
+          display_name,
+          network,
+          rgb_account_ref,
+          main_btc_address,
+          utxo_funding_address,
+          last_seen_at,
+          updated_at
+        FROM wallets
+        WHERE wallet_key = $1
+          AND network = 'regtest'
+        LIMIT 1
+      `,
+      [walletKey]
+    );
+
+    const wallet = existing.rows[0];
+    if (!wallet) {
+      sendJson(res, 404, { ok: false, error: 'Wallet not found.' });
+      return;
+    }
+
+    const effectiveWallet = {
+      ...wallet,
+      rgb_account_ref: accountRef,
+    };
+
+    const readiness = await buildRgbIssueAssetReadiness(effectiveWallet, {
+      requestedChannelFundingSats,
+      channelFundingTiming,
+      accountRefOverride: accountRef,
+    });
+
+    if (channelFundingTiming === 'during_issuance' && !readiness.channelFundingReady) {
+      sendJson(res, 400, {
+        ok: false,
+        error: `Immediate primary-channel bootstrap requires ${readiness.requiredFundingSats.toLocaleString()} sats in the wallet funding address. Current shortfall: ${readiness.channelFundingShortfallSats.toLocaleString()} sats.`,
+        readiness,
+      });
+      return;
+    }
+
+    const application = await createPrimaryBootstrapChannelApplication({
+      wallet: effectiveWallet,
+      accountRef,
+      assetId,
+      assetAmount,
+      issuanceId: `admin-bootstrap-${randomUUID()}`,
+      issuedAt: new Date(),
+      requestedChannelBtcSats,
+      channelFundingTiming,
+      readiness,
+      applicationSource: 'admin_primary_channel_bootstrap',
+    });
+
+    const lifecycleStatus = application?.channel_id || application?.status === 'channel_active'
+      ? 'lightning_ready'
+      : (application?.btc_deposit_status || '') === 'confirmed'
+        ? 'waiting_primary_channel'
+        : 'waiting_btc_channel_funding';
+
+    sendJson(res, 200, {
+      ok: true,
+      walletKey,
+      accountRef,
+      assetId,
+      readiness,
+      lifecycleStatus,
+      application: {
+        id: application?.id || null,
+        status: application?.status || null,
+        channelId: application?.channel_id || null,
+        btcDepositAddress: application?.btc_deposit_address || null,
+        btcDepositStatus: application?.btc_deposit_status || null,
+        peerPubkey: application?.peer_pubkey || null,
+        rgbAssetAmount: application?.rgb_asset_amount || null,
+        btcAmountSats: application?.btc_amount_sats || null,
+      },
+    });
+  } catch (error) {
+    console.error(`[${nowIso()}] [ADMIN] Primary channel bootstrap failed:`, error.message);
+    sendJson(res, 502, { ok: false, error: error.message });
+  }
 }
 
 function pickIssuedAssetColor(ticker = '') {
@@ -7119,6 +7262,12 @@ async function requestHandler(req, res) {
   if (req.method === 'POST' && pathname === '/api/admin/rgb-node-control') {
     if (!requireAdminSession(req, res)) return;
     await handleAdminRgbNodeControl(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/primary-channel-bootstrap') {
+    if (!requireAdminSession(req, res)) return;
+    await handleAdminPrimaryChannelBootstrap(req, res);
     return;
   }
 

@@ -94,6 +94,24 @@ const walletAssignmentBody = document.getElementById('wallet-assignment-body');
 const walletAssignmentFilterInput = document.getElementById('wallet-assignment-filter-input');
 const walletAssignmentFilterType = document.getElementById('wallet-assignment-filter-type');
 const walletAssignmentForceToggle = document.getElementById('wallet-assignment-force-toggle');
+const primaryChannelForm = document.getElementById('primary-channel-form');
+const primaryChannelCard = document.getElementById('primary-channel-card');
+const primaryWalletKey = document.getElementById('primary-wallet-key');
+const primaryWalletKeyList = document.getElementById('primary-wallet-key-list');
+const primaryAccountRef = document.getElementById('primary-account-ref');
+const primaryAssetId = document.getElementById('primary-asset-id');
+const primaryAssetPickerButton = document.getElementById('primary-asset-picker-button');
+const primaryAssetAmount = document.getElementById('primary-asset-amount');
+const primaryChannelFundingSats = document.getElementById('primary-channel-funding-sats');
+const primaryChannelFundingTiming = document.getElementById('primary-channel-funding-timing');
+const primaryChannelSubmit = document.getElementById('primary-channel-submit');
+const primaryChannelStatus = document.getElementById('primary-channel-status');
+const primaryChannelLifecycle = document.getElementById('primary-channel-lifecycle');
+const primaryChannelReadinessDetail = document.getElementById('primary-channel-readiness-detail');
+const primaryChannelApplicationId = document.getElementById('primary-channel-application-id');
+const primaryChannelApplicationDetail = document.getElementById('primary-channel-application-detail');
+const primaryChannelId = document.getElementById('primary-channel-id');
+const primaryChannelIdDetail = document.getElementById('primary-channel-id-detail');
 const adminWalletCard = document.getElementById('admin-wallet-card');
 const walletAssignmentCard = document.getElementById('wallet-assignment-card');
 const adminOperatorTab = document.getElementById('admin-operator-tab');
@@ -291,12 +309,20 @@ function updateAdminUi() {
     walletAssignmentCard.classList.toggle('hidden', !isAuthenticated);
   }
 
+  if (primaryChannelCard) {
+    primaryChannelCard.classList.toggle('hidden', !isAuthenticated);
+  }
+
   if (openChannelCard) {
     openChannelCard.classList.toggle('hidden', !isAuthenticated);
   }
 
   if (openChannelButton) {
     openChannelButton.disabled = !isAuthenticated;
+  }
+
+  if (primaryChannelSubmit) {
+    primaryChannelSubmit.disabled = !isAuthenticated;
   }
 
   if (adminAuthButton) {
@@ -430,6 +456,13 @@ function renderWalletAssignments() {
     .join('');
 }
 
+function renderPrimaryWalletOptions() {
+  if (!primaryWalletKeyList) return;
+  primaryWalletKeyList.innerHTML = walletAssignments
+    .map((wallet) => `<option value="${wallet.walletKey}">${wallet.displayName || wallet.walletKey}</option>`)
+    .join('');
+}
+
 async function loadWalletAssignments({ silent = false } = {}) {
   if (!adminSessionToken) {
     walletAssignments = [];
@@ -463,6 +496,7 @@ async function loadWalletAssignments({ silent = false } = {}) {
     registeredRgbNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
     pendingWalletAssignments = new Map();
     renderWalletAssignments();
+    renderPrimaryWalletOptions();
     const visibleCount = getFilteredWalletAssignments().length;
     setWalletAssignmentStatus(`Loaded ${walletAssignments.length} wallet assignment${walletAssignments.length === 1 ? '' : 's'}${visibleCount !== walletAssignments.length ? ` • showing ${visibleCount}` : ''}.`);
   } catch (error) {
@@ -470,6 +504,7 @@ async function loadWalletAssignments({ silent = false } = {}) {
     registeredRgbNodes = [];
     pendingWalletAssignments = new Map();
     renderWalletAssignments();
+    renderPrimaryWalletOptions();
     setWalletAssignmentStatus(error.message || 'Failed to load wallet assignments.');
   }
 }
@@ -1338,6 +1373,8 @@ function renderAssetPickerRows() {
         plmAssetId.value = contractId;
         autoFillPlmPeerPubkey(false);
         setPlmMessage(`PLM asset selected from Asset List: ${shorten(contractId, 14, 10)}.`);
+      } else if (assetPickerTarget === 'primary' && primaryAssetId) {
+        primaryAssetId.value = contractId;
       } else if (openAssetId) {
         openAssetId.value = contractId;
       }
@@ -1406,6 +1443,10 @@ function openAssetPicker(target = 'open') {
 
 function openPlmAssetPicker() {
   openAssetPicker('plm');
+}
+
+function openPrimaryAssetPicker() {
+  openAssetPicker('primary');
 }
 
 function closeAssetPicker() {
@@ -1927,6 +1968,97 @@ async function loadDashboard() {
   }
 }
 
+function resetPrimaryChannelResult() {
+  if (primaryChannelLifecycle) primaryChannelLifecycle.textContent = 'Waiting';
+  if (primaryChannelReadinessDetail) primaryChannelReadinessDetail.textContent = 'Submit the form to create a primary channel application.';
+  if (primaryChannelApplicationId) primaryChannelApplicationId.textContent = '-';
+  if (primaryChannelApplicationDetail) primaryChannelApplicationDetail.textContent = 'No application created yet.';
+  if (primaryChannelId) primaryChannelId.textContent = '-';
+  if (primaryChannelIdDetail) primaryChannelIdDetail.textContent = 'A channel ID appears after bootstrap opens the channel.';
+}
+
+async function submitPrimaryChannel(event) {
+  event.preventDefault();
+
+  if (!adminSessionToken) {
+    if (primaryChannelStatus) primaryChannelStatus.textContent = 'Admin authentication required.';
+    return;
+  }
+
+  const body = {
+    walletKey: primaryWalletKey?.value?.trim() || '',
+    accountRef: primaryAccountRef?.value || '',
+    assetId: primaryAssetId?.value?.trim() || '',
+    assetAmount: Number(primaryAssetAmount?.value || 0),
+    channelFundingSats: Number(primaryChannelFundingSats?.value || 0),
+    channelFundingTiming: primaryChannelFundingTiming?.value || 'after_issuance',
+  };
+
+  if (primaryChannelStatus) {
+    primaryChannelStatus.textContent = 'Creating primary channel application...';
+  }
+  resetPrimaryChannelResult();
+
+  try {
+    const response = await fetch('/api/admin/primary-channel-bootstrap', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAdminHeaders(),
+      },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      if (response.status === 403) {
+        persistAdminSessionToken(null);
+        updateAdminUi();
+      }
+      throw new Error(payload.error || 'Failed to create primary channel application.');
+    }
+
+    if (primaryChannelLifecycle) {
+      primaryChannelLifecycle.textContent = payload.lifecycleStatus || 'waiting_primary_channel';
+    }
+    if (primaryChannelReadinessDetail) {
+      const readiness = payload.readiness || {};
+      primaryChannelReadinessDetail.textContent =
+        body.channelFundingTiming === 'during_issuance'
+          ? `Funding wallet sats: ${formatNumber(readiness.confirmedFundingSats || 0)} • Required: ${formatNumber(readiness.requiredFundingSats || 0)}`
+          : `Deposit address ready for ${formatNumber(body.channelFundingSats || 0)} sats.`;
+    }
+    if (primaryChannelApplicationId) {
+      primaryChannelApplicationId.textContent = payload.application?.id || '-';
+    }
+    if (primaryChannelApplicationDetail) {
+      primaryChannelApplicationDetail.textContent =
+        payload.application?.btcDepositAddress
+          ? `BTC deposit: ${shorten(payload.application.btcDepositAddress, 10, 8)}`
+          : (payload.application?.status || 'Application created.');
+    }
+    if (primaryChannelId) {
+      primaryChannelId.textContent = payload.application?.channelId
+        ? shorten(payload.application.channelId, 12, 8)
+        : '-';
+    }
+    if (primaryChannelIdDetail) {
+      primaryChannelIdDetail.textContent = payload.application?.channelId
+        ? 'Primary channel is open or opening on the node.'
+        : `Status: ${payload.application?.status || 'pending'}`;
+    }
+    if (primaryChannelStatus) {
+      primaryChannelStatus.textContent = payload.application?.channelId
+        ? 'Primary channel opened successfully.'
+        : 'Primary channel application created.';
+    }
+    await loadDashboard();
+  } catch (error) {
+    if (primaryChannelStatus) {
+      primaryChannelStatus.textContent = error.message || 'Failed to create primary channel application.';
+    }
+  }
+}
+
 if (channelSelect) {
   channelSelect.addEventListener('change', () => {
     selectedChannelId = channelSelect.value;
@@ -1997,6 +2129,10 @@ if (assetPickerButton) {
 
 if (plmAssetPickerButton) {
   plmAssetPickerButton.addEventListener('click', openPlmAssetPicker);
+}
+
+if (primaryAssetPickerButton) {
+  primaryAssetPickerButton.addEventListener('click', openPrimaryAssetPicker);
 }
 
 if (assetPickerClose) {
@@ -2072,6 +2208,10 @@ if (adminLogoutButton) {
   adminLogoutButton.addEventListener('click', async () => {
     await lockAdminControls();
   });
+}
+
+if (primaryChannelForm) {
+  primaryChannelForm.addEventListener('submit', submitPrimaryChannel);
 }
 
 if (plmApplicationForm) {

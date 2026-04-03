@@ -243,7 +243,8 @@ body::-webkit-scrollbar-thumb:hover,
 
 .plm-plan-card,
 .plm-application-card,
-.open-channel-card {
+.open-channel-card,
+.primary-channel-card {
   margin-bottom: 22px;
 }
 
@@ -253,7 +254,8 @@ body::-webkit-scrollbar-thumb:hover,
 
 .plm-checklist-grid,
 .plm-status-grid,
-.plm-funding-grid {
+.plm-funding-grid,
+.primary-channel-result-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 14px;

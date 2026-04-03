@@ -734,7 +734,7 @@ async function ensureBoardTicketsTable() {
       title TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('todo', 'progress', 'review', 'done')),
       priority TEXT NOT NULL CHECK (priority IN ('high', 'medium', 'low')),
-      category TEXT NOT NULL CHECK (category IN ('ui', 'android', 'node', 'token', 'research', 'backend', 'infra')),
+      category TEXT NOT NULL CHECK (category IN ('ui', 'android', 'node', 'token', 'research', 'backend', 'infra', 'test-cases')),
       estimate TEXT NOT NULL DEFAULT '1d',
       assignee TEXT NOT NULL DEFAULT '—',
       desc_html TEXT NOT NULL,

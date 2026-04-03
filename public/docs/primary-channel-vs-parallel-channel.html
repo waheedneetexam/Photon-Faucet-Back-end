@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Primary Channel vs Parallel Channel</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #0c1322;
+      color: #eef4ff;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 40px 20px 60px;
+    }
+    h1 { margin: 0 0 10px; font-size: 34px; }
+    h2 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      margin: 34px 0 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #1f3050;
+    }
+    p, li { color: #b1c0da; line-height: 1.65; }
+    a { color: #75d4ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card {
+      background: #121b2e;
+      border: 1px solid #2a3b5a;
+      border-radius: 14px;
+      padding: 20px 22px;
+      margin-top: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .mini {
+      background: #0d1729;
+      border: 1px solid #233555;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .diagram {
+      background: #0a1220;
+      border: 1px solid #223150;
+      border-radius: 12px;
+      padding: 18px;
+      overflow-x: auto;
+    }
+    pre {
+      margin: 0;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      color: #d8e5ff;
+    }
+    code {
+      background: #091120;
+      border: 1px solid #21304c;
+      border-radius: 5px;
+      padding: 1px 6px;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .03em;
+      margin-bottom: 10px;
+    }
+    .pill-primary {
+      background: #2b1a06;
+      color: #fbbf24;
+      border: 1px solid #6e4612;
+    }
+    .pill-parallel {
+      background: #111c31;
+      color: #71d7ff;
+      border: 1px solid #264d77;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid #233352;
+      padding: 12px 10px;
+    }
+    th { color: #eef4ff; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a href="/index.html">← Back to Docs Index</a></p>
+    <h1>Primary Channel vs Parallel Channel</h1>
+    <p>
+      In PhotonBolt, these two channel types are related, but they are not the same job. The
+      <strong>primary channel</strong> is the first channel that makes a newly issued RGB asset
+      usable over Lightning. A <strong>parallel channel</strong> is an additional channel added
+      later to improve reach, scale, capacity, or routing.
+    </p>
+
+    <h2>1. Simple Difference</h2>
+    <div class="grid">
+      <div class="mini">
+        <div class="pill pill-primary">Primary Channel</div>
+        <p>The first Lightning path created for a newly issued RGB asset.</p>
+        <ul>
+          <li>Created during or after issuance bootstrap</li>
+          <li>Uses reserved issuer liquidity</li>
+          <li>Answers: <em>Can this asset transact over Lightning at all?</em></li>
+          <li>Usually tied to admin/backend infrastructure today</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <div class="pill pill-parallel">Parallel Channel</div>
+        <p>An extra channel created after the first working path already exists.</p>
+        <ul>
+          <li>Created later for scale or routing</li>
+          <li>Expands asset reach or capacity</li>
+          <li>Answers: <em>Can this asset route more volume or more peers?</em></li>
+          <li>Not the first prerequisite for Lightning viability</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>2. Visual Flow</h2>
+    <div class="diagram">
+<pre>User Issues Asset
+      |
+      v
+Asset exists in wallet + registry
+      |
+      |  no primary channel yet
+      v
+Registry-only asset
+      |
+      | create first Lightning path
+      v
+Primary Channel Created
+      |
+      | asset is now Lightning-viable
+      v
+Users can start Lightning transfers
+      |
+      | add more reach / capacity / peers
+      v
+Parallel Channels Created
+      |
+      v
+Better routing, more liquidity, more scale</pre>
+    </div>
+
+    <h2>3. Why The Primary Channel Matters More First</h2>
+    <div class="card">
+      <p>
+        A token can be issued successfully and still be <strong>not ready for Lightning</strong>.
+        That happens when the asset is visible in the wallet and in the Asset Registry, but there is
+        no first usable channel for it yet.
+      </p>
+      <p>
+        That is why the primary channel is special. It is the step that changes the asset from:
+      </p>
+      <ul>
+        <li><strong>Registry-only</strong> → the asset exists but is not yet Lightning-usable</li>
+        <li><strong>Lightning-ready</strong> → the first working Lightning route exists</li>
+      </ul>
+    </div>
+
+    <h2>4. Why Parallel Channels Exist</h2>
+    <div class="card">
+      <p>Parallel channels are not the first unlock step. They are the growth step.</p>
+      <ul>
+        <li>Add more liquidity after the first channel already works</li>
+        <li>Connect to more nodes or more routing peers</li>
+        <li>Reduce dependence on one path</li>
+        <li>Support more transfer volume or larger transaction demand</li>
+      </ul>
+      <p>
+        So if the primary channel is the <em>first bridge</em>, parallel channels are the
+        <em>extra bridges</em>.
+      </p>
+    </div>
+
+    <h2>5. PhotonBolt Operational Reality Today</h2>
+    <div class="card">
+      <p>
+        In the current PhotonBolt architecture, the wallet can request primary-channel bootstrap
+        during issuance, but the actual execution still depends on backend/admin infrastructure.
+      </p>
+      <ul>
+        <li>User chooses bootstrap options in the wallet</li>
+        <li>Backend stores the liquidity plan and channel funding request</li>
+        <li>Backend creates a channel application for the new asset</li>
+        <li>BTC funding, node health, and actual channel-open work still happen on admin-controlled infrastructure</li>
+        <li>If automatic bootstrap does not finish, operator/admin action may still be required</li>
+      </ul>
+      <p>
+        So today the primary channel is <strong>user-requested but backend/admin-executed</strong>.
+      </p>
+    </div>
+
+    <h2>6. Comparison Table</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Question</th>
+            <th>Primary Channel</th>
+            <th>Parallel Channel</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>When is it created?</td>
+            <td>During or just after issuance bootstrap</td>
+            <td>After the asset already has a working first channel</td>
+          </tr>
+          <tr>
+            <td>Why is it created?</td>
+            <td>To make the asset Lightning-usable for the first time</td>
+            <td>To improve liquidity, routing, capacity, and reach</td>
+          </tr>
+          <tr>
+            <td>Can the asset work without it?</td>
+            <td>No, not over Lightning</td>
+            <td>Yes, but with less scale/flexibility</td>
+          </tr>
+          <tr>
+            <td>Who executes it today?</td>
+            <td>Backend/admin infrastructure</td>
+            <td>Usually backend/admin infrastructure too, but as an expansion step</td>
+          </tr>
+          <tr>
+            <td>Main product status transition</td>
+            <td><code>registry-only</code> → <code>lightning-ready</code></td>
+            <td><code>lightning-ready</code> → broader liquidity/routing coverage</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>7. Recommended Product Wording</h2>
+    <div class="card">
+      <p>To avoid confusion in the UI and docs, PhotonBolt should describe them like this:</p>
+      <ul>
+        <li><strong>Primary Channel</strong>: “Create the first Lightning path for this asset”</li>
+        <li><strong>Parallel Channel</strong>: “Add another Lightning path to expand liquidity and routing”</li>
+      </ul>
+      <p>
+        That wording makes it clear that the primary channel is the first viability step and the
+        parallel channel is a later scaling step.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
