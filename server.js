@@ -3327,7 +3327,11 @@ async function executeSameNodeWalletTransfer({
       ? { id: receiverInvoice.wallet_asset_id }
       : (await syncWalletAssetFromRgbNode({ walletId: receiverWallet.id, assetId })).walletAsset;
 
-  const senderBalanceBefore = await deriveWalletScopedBalance(senderSynced.walletAsset.id);
+  // Prefer live node balance so internal same-node transfers don't depend on
+  // the DB-derived balance being perfectly synced.
+  const senderBalanceBefore =
+    (await fetchWalletLightningAssetBalance(senderWallet, assetId)) ||
+    (await deriveWalletScopedBalance(senderSynced.walletAsset.id));
   const requestedAmount = BigInt(normalizeTransferAmount(assetAmountValue));
   const availableAmount =
     BigInt(normalizeTransferAmount(senderBalanceBefore.spendable)) +
