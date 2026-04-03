@@ -2875,14 +2875,10 @@ async function handleRgbBalance(req, res) {
     await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
-    const balance = synced.asset?.balance
-      ? {
-        ...normalizeLiveRgbBalance(synced.asset.balance),
-        locked_missing_secret: '0',
-        locked_unconfirmed: '0',
-        spendability_status: 'spendable',
-      }
-      : derivedBalance;
+    // Always return the wallet-scoped ledger balance (DB transfers + internal same-node transfers).
+    // Live node balances reflect the node's global view, not the per-wallet scoped balance when
+    // multiple wallets share one node.
+    const balance = derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     sendJson(res, 200, {
       ok: true,
