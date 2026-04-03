@@ -1905,7 +1905,7 @@ function normalizeTransferAmount(value) {
 }
 
 async function getWalletInvoiceOwnership(walletId, assetId) {
-  const [invoiceResult, outgoingSendResult] = await Promise.all([
+  const [invoiceResult, outgoingSendResult, issuedByResult] = await Promise.all([
     query(
       `
         SELECT
@@ -1934,7 +1934,21 @@ async function getWalletInvoiceOwnership(walletId, assetId) {
       `,
       [walletId, assetId]
     ),
+    query(
+      `
+        SELECT
+          COALESCE(metadata->>'issued_by_wallet_key', issuer_ref, '') AS issued_by_wallet_key
+        FROM asset_registry
+        WHERE contract_id = $1
+          AND network = 'regtest'
+        LIMIT 1
+      `,
+      [assetId]
+    ),
   ]);
+
+  const issuedByWalletKeyRaw = issuedByResult.rows?.[0]?.issued_by_wallet_key || '';
+  const issuedByWalletKey = typeof issuedByWalletKeyRaw === 'string' ? issuedByWalletKeyRaw.trim() : '';
 
   return {
     recipientIds: new Set(invoiceResult.rows.map((row) => row.recipient_id).filter(Boolean)),
@@ -1948,6 +1962,7 @@ async function getWalletInvoiceOwnership(walletId, assetId) {
         .map((row) => row.payload?.recipientId || null)
         .filter(Boolean)
     ),
+    issuedByWalletKey,
   };
 }
 
@@ -2360,7 +2375,10 @@ function isTransferRelevantToWallet(transfer, wallet, ownership) {
   const recipientId = transfer.recipient_id || null;
 
   if (kind === 'Issuance') {
-    return wallet.wallet_key === RGB_OWNER_WALLET_KEY;
+    return (
+      wallet.wallet_key === RGB_OWNER_WALLET_KEY ||
+      (ownership?.issuedByWalletKey && wallet.wallet_key === ownership.issuedByWalletKey)
+    );
   }
 
   if (kind.startsWith('Receive')) {
