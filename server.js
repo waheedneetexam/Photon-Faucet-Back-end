@@ -2875,10 +2875,23 @@ async function handleRgbBalance(req, res) {
     await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
-    // Always return the wallet-scoped ledger balance (DB transfers + internal same-node transfers).
-    // Live node balances reflect the node's global view, not the per-wallet scoped balance when
-    // multiple wallets share one node.
-    const balance = derivedBalance;
+    // Wallet-scoped ledger balance (DB transfers + internal same-node transfers) is the source of truth
+    // for shared-node wallets, but new wallets may not have their historical transfers imported yet.
+    // If the ledger is empty, fall back to the live node-reported balance so the UI doesn't show 0.
+    const transferCountResult = await query(
+      `SELECT COUNT(*)::int AS count FROM rgb_transfers WHERE wallet_asset_id = $1`,
+      [synced.walletAsset.id]
+    );
+    const transferCount = Number(transferCountResult.rows?.[0]?.count || 0);
+    const balance =
+      transferCount === 0 && synced.asset?.balance
+        ? {
+          ...normalizeLiveRgbBalance(synced.asset.balance),
+          locked_missing_secret: '0',
+          locked_unconfirmed: '0',
+          spendability_status: 'spendable',
+        }
+        : derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     sendJson(res, 200, {
       ok: true,
