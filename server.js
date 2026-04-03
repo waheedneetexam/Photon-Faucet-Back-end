@@ -3543,6 +3543,7 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
   const assetId = typeof decoded?.asset_id === 'string' ? decoded.asset_id : null;
   const payeePubkey = typeof decoded?.payee_pubkey === 'string' ? decoded.payee_pubkey : null;
   const storedInvoice = await findStoredInvoiceByString(invoice);
+  let senderPubkey = null;
 
   if (!assetId) {
     throw new Error('Lightning invoice is missing an RGB asset id.');
@@ -3552,13 +3553,16 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
     throw new Error('Cannot pay your own invoice from the same wallet.');
   }
 
-  if (storedInvoice) {
-    const receiverWallet = {
-      wallet_key: storedInvoice.wallet_key,
-      rgb_account_ref: storedInvoice.rgb_account_ref,
-    };
-    const receiverAccountRef = storedInvoice.rgb_account_ref || getDefaultAccountRefForWallet(receiverWallet);
-    if (receiverAccountRef === accountRef) {
+  if (payeePubkey) {
+    const nodeInfo = await rgbNodeRequestWithBase(apiBase, '/nodeinfo', {}, 'GET');
+    senderPubkey = typeof nodeInfo?.pubkey === 'string' ? nodeInfo.pubkey : null;
+  }
+
+  // Same-node invoices are rejected by the RGB Lightning node (it can't "pay itself").
+  // If we can map the invoice back to a different wallet in our DB, we can treat it as
+  // an internal ledger transfer instead of attempting an LN payment.
+  if (senderPubkey && payeePubkey && senderPubkey === payeePubkey) {
+    if (storedInvoice) {
       return executeSameNodeWalletTransfer({
         senderWallet: wallet,
         senderAccountRef: accountRef,
@@ -3568,16 +3572,9 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
         eventSource,
       });
     }
-  }
-
-  if (payeePubkey) {
-    const nodeInfo = await rgbNodeRequestWithBase(apiBase, '/nodeinfo', {}, 'GET');
-    const senderPubkey = typeof nodeInfo?.pubkey === 'string' ? nodeInfo.pubkey : null;
-    if (senderPubkey && senderPubkey === payeePubkey) {
-      throw new Error(
-        `RGB Lightning invoice belongs to the sender node. Generate the invoice from a different wallet/node first (${senderPubkey}).`
-      );
-    }
+    throw new Error(
+      `RGB Lightning invoice belongs to the sender node. Generate the invoice from a different wallet/node first (${senderPubkey}).`
+    );
   }
 
   const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
