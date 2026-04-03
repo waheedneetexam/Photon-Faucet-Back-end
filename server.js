@@ -2382,6 +2382,12 @@ function isTransferRelevantToWallet(transfer, wallet, ownership) {
   }
 
   if (kind.startsWith('Receive')) {
+    // Some node implementations represent an issuance/mint as a Receive-like transfer
+    // without a recipient id. Attribute those to the issuing wallet so the per-wallet
+    // ledger is populated correctly on shared nodes.
+    if (!recipientId && ownership?.issuedByWalletKey && wallet.wallet_key === ownership.issuedByWalletKey) {
+      return true;
+    }
     return (
       (recipientId && ownership.recipientIds.has(recipientId)) ||
       (Number.isFinite(transferIdx) && ownership.batchTransferIdxs.has(transferIdx))
