@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RGBits Prism Server v10</title>
+  <style>
+    :root{
+      --bg:#0c1322;
+      --panel:#121b2e;
+      --panel2:#0a1e36;
+      --border:#2b3958;
+      --text:#eef4ff;
+      --muted:#aab9d5;
+      --link:#6fd3ff;
+      --codebg:#091120;
+      --codeborder:#21304c;
+      --ok:#4ade80;
+      --warn:#fbbf24;
+    }
+    body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text);}
+    .wrap{max-width:1024px;margin:0 auto;padding:40px 20px 70px;}
+    h1{margin:0 0 8px;font-size:34px;}
+    h2{
+      font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+      margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid #1e3050;
+    }
+    p{color:var(--muted);line-height:1.65;margin:10px 0;}
+    ul,ol{margin:10px 0 0;padding-left:22px;}
+    li{margin:8px 0;line-height:1.55;}
+    a{color:var(--link);text-decoration:none;}
+    a:hover{text-decoration:underline;}
+    .card{padding:18px 22px;border:1px solid var(--border);border-radius:12px;background:var(--panel);margin-bottom:10px;}
+    .card.alt{border-color:#1a3a5e;background:var(--panel2);}
+    code{background:var(--codebg);border:1px solid var(--codeborder);border-radius:5px;padding:1px 6px;font-size:12px;}
+    pre{background:var(--codebg);border:1px solid var(--codeborder);border-radius:10px;padding:12px 14px;overflow:auto;}
+    pre code{border:none;padding:0;}
+    .pill{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:20px;border:1px solid #2b5078;background:#0d2240;color:#71d7ff;}
+    .kv{display:grid;grid-template-columns: 260px 1fr;gap:10px 14px;}
+    .kv div{padding:10px 0;border-bottom:1px dashed #223150;}
+    .kv .k{color:#cfe2ff;font-weight:700;}
+    .kv .v{color:var(--muted);}
+    .note{color:#cfe2ff;}
+    .ok{color:var(--ok);font-weight:700;}
+    .warn{color:var(--warn);font-weight:700;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>⚡ RGBits Prism Server v10</h1>
+    <p class="note">
+      This page documents what Prism Server does today (regtest/dev): authentication, virtual wallets, BTC Lightning payments,
+      RGB asset support, Prism split engine, webhooks, and websocket events.
+    </p>
+
+    <div class="card alt">
+      <p><span class="pill">Repo</span> <code>RGBits-Prism-server</code></p>
+      <p><span class="pill">Service</span> <code>rgbits-prism-api</code> (Axum, Rust)</p>
+      <p><span class="pill">Dependencies</span> Postgres 16, Redis 7, RGB Lightning Node (RLN) over HTTP</p>
+    </div>
+
+    <h2>1. What Prism Server Is</h2>
+    <div class="card">
+      <p>
+        Prism Server is the backend API that turns “wallet actions” into node actions. It is the place where we keep the truth for:
+        users, wallet identities, payment history, and (in regtest/dev) simplified BTC and RGB balances.
+      </p>
+      <ul>
+        <li><span class="ok">It talks to RLN</span> using <code>RLN_BASE_URL</code> + <code>RLN_AUTH</code> and calls endpoints like <code>lninvoice</code>, <code>sendpayment</code>, <code>decodelninvoice</code>, <code>listpayments</code>.</li>
+        <li><span class="ok">It stores state</span> in Postgres (wallets, assets, balances, payments, prism rules, executions, webhooks).</li>
+        <li><span class="ok">It pushes events</span> using Redis pub/sub (wallet scoped) and can also deliver events to HTTP webhooks.</li>
+      </ul>
+    </div>
+
+    <h2>2. High-Level Diagram</h2>
+    <div class="card">
+      <pre><code>Browser/Wallet/Apps
+  |
+  |  HTTPS (REST + WS)
+  v
+RGBits Prism Server (Axum)
+  |-- Postgres (source of truth: users/wallets/payments/assets/rules/webhooks)
+  |-- Redis (pubsub + token/session storage)
+  v
+RGB Lightning Node (RLN)
+  |-- Lightning node backend + RGB runtime</code></pre>
+      <p class="note">
+        Important mental model: Prism Server is the “product API” and RLN is the “payment engine”.
+      </p>
+    </div>
+
+    <h2>3. Authentication Model</h2>
+    <div class="card">
+      <p>Auth is challenge-response (secp256k1) + JWT.</p>
+      <ul>
+        <li><code>POST /auth/enroll</code>: enroll a pubkey + bitcoin address into <code>users</code>.</li>
+        <li><code>GET /auth/challenge</code>: returns a nonce challenge for that pubkey.</li>
+        <li><code>POST /auth/verify</code>: verifies ECDSA signature, returns access JWT + refresh token (refresh stored in Redis).</li>
+        <li><code>POST /auth/refresh</code> and <code>POST /auth/logout</code>.</li>
+        <li><code>Authorization: Bearer &lt;jwt&gt;</code> protects user endpoints.</li>
+      </ul>
+      <p class="warn">
+        Note: legacy <code>users.email</code> + <code>password_hash</code> may still exist in schema, but current auth flow is pubkey based.
+      </p>
+    </div>
+
+    <h2>4. Wallet Identity (Wallet Key Header)</h2>
+    <div class="card">
+      <p>
+        Many endpoints require a logical wallet identity header:
+        <code>x-photon-wallet-key</code>. This is the wallet’s “API identity”, not the mnemonic.
+      </p>
+      <ul>
+        <li>Payments and invoices are scoped to a wallet row in <code>wallets</code>.</li>
+        <li>One user can own multiple wallets (virtual wallets).</li>
+      </ul>
+    </div>
+
+    <h2>5. BTC Lightning Payments (Current Scope)</h2>
+    <div class="card">
+      <ul>
+        <li><code>POST /payments/invoices</code> creates a BOLT11 invoice (and stores a pending inbound row in <code>payments</code>).</li>
+        <li><code>POST /payments/pay</code> pays a BOLT11 invoice (stores outbound pending, then settles/failed).</li>
+        <li><code>POST /payments/keysend</code> sends keysend payments.</li>
+        <li>Reconciler loop polls RLN <code>listpayments</code> and updates pending payment rows to <code>settled</code> or <code>failed</code>.</li>
+      </ul>
+      <p class="warn">
+        BTC balance tracking in Prism Server is simplified for dev: it uses <code>wallets.btc_balance_msat</code>.
+      </p>
+    </div>
+
+    <h2>6. RGB Assets (Registry, Invoices, Payments, Issuance)</h2>
+    <div class="card">
+      <ul>
+        <li><code>GET /assets</code>, <code>GET /assets/:asset_id</code> read from <code>rgb_assets</code>.</li>
+        <li>On startup, Prism performs a best-effort RLN asset sync into <code>rgb_assets</code>.</li>
+        <li><code>POST /payments/invoices</code> supports RGB invoices by including <code>asset_id</code> + <code>asset_amount</code>.</li>
+        <li><code>POST /payments/pay</code> detects RGB invoices via decode fields and (dev model) checks/deducts spendable from <code>rgb_balances</code>.</li>
+        <li>On settlement (inbound, non-prism), Prism credits the receiver wallet <code>rgb_balances</code>.</li>
+        <li><code>POST /assets/issue</code> is admin-only issuance (calls RLN, upserts <code>rgb_assets</code>, credits issuer supply).</li>
+      </ul>
+    </div>
+
+    <h2>7. Prism Split Engine</h2>
+    <div class="card">
+      <p>Prism rules define how an inbound invoice should be split across recipient wallets.</p>
+      <ul>
+        <li>Rule CRUD: <code>POST/GET/PUT/DELETE /prism/rules</code></li>
+        <li>Invoice generation: <code>POST /prism/rules/:id/invoice</code> creates an invoice linked to <code>payments.prism_rule_id</code>.</li>
+        <li>On settlement: Prism reads the rule, calculates split amounts (floor division), remainder goes to the “owner” split entry, credits recipients in one DB transaction, and writes an audit row in <code>prism_executions</code>.</li>
+        <li>Audit: <code>GET /prism/rules/:id/splits</code> returns historical executions.</li>
+        <li>External targets (PRISM-06): a split item can include <code>external_invoice</code> (BTC only, paid best-effort after commit).</li>
+      </ul>
+      <p class="warn">Percent mode is currently the main supported mode: sum of <code>share_pct</code> must equal 100.</p>
+    </div>
+
+    <h2>8. Webhooks (WH-01..WH-03)</h2>
+    <div class="card">
+      <ul>
+        <li>Create/list/delete: <code>POST /webhooks</code>, <code>GET /webhooks</code>, <code>DELETE /webhooks/:id</code>.</li>
+        <li>Deliveries are queued in <code>webhook_deliveries</code> with status and retry timing.</li>
+        <li>Dispatcher loop posts JSON to webhook URLs.</li>
+        <li>Signature header: <code>X-RGBits-Signature</code> = HMAC-SHA256 hex over the raw JSON payload.</li>
+        <li>Retries: backoff schedule up to about 72 hours.</li>
+      </ul>
+      <p class="warn">
+        Secret storage currently uses <code>webhooks.secret_hash</code> as a secret field (not hashed). This is acceptable only for dev;
+        production should encrypt-at-rest or store a hash and do per-request derived signatures.
+      </p>
+    </div>
+
+    <h2>9. WebSocket Events (WH-04)</h2>
+    <div class="card">
+      <p>Wallet-scoped websocket stream:</p>
+      <ul>
+        <li><code>GET /ws?token=&lt;jwt&gt;&amp;wallet_id=&lt;wallet_uuid&gt;</code></li>
+        <li>Internally subscribes to Redis pubsub channel: <code>wallet:&lt;wallet_id&gt;:events</code></li>
+      </ul>
+      <pre><code>// Browser example (dev)
+const ws = new WebSocket("wss://YOUR_HOST/ws?token=JWT&amp;wallet_id=WALLET_UUID");
+ws.onmessage = (ev) =&gt; console.log("event", ev.data);
+</code></pre>
+    </div>
+
+    <h2>10. Environment Variables</h2>
+    <div class="card">
+      <div class="kv">
+        <div class="k"><code>PRISM_BIND</code></div><div class="v">Bind address, e.g. <code>0.0.0.0:4000</code></div>
+        <div class="k"><code>DATABASE_URL</code></div><div class="v">Postgres URL</div>
+        <div class="k"><code>REDIS_URL</code></div><div class="v">Redis URL</div>
+        <div class="k"><code>JWT_SECRET</code></div><div class="v">JWT signing secret</div>
+        <div class="k"><code>RLN_BASE_URL</code></div><div class="v">RLN HTTP base URL</div>
+        <div class="k"><code>RLN_AUTH</code></div><div class="v">Authorization header value for RLN</div>
+        <div class="k"><code>PAYMENT_RECONCILE_INTERVAL_MS</code></div><div class="v">Poll interval for settlement reconciler</div>
+      </div>
+    </div>
+
+    <h2>11. Quick API Checklist</h2>
+    <div class="card">
+      <ul>
+        <li><span class="pill">Auth</span> <code>/auth/enroll</code>, <code>/auth/challenge</code>, <code>/auth/verify</code>, <code>/auth/refresh</code>, <code>/auth/logout</code></li>
+        <li><span class="pill">Wallets</span> <code>/wallets</code> CRUD + <code>/wallets/:id/transactions</code></li>
+        <li><span class="pill">Payments</span> <code>/payments/invoices</code>, <code>/payments/pay</code>, <code>/payments/keysend</code>, <code>/payments/internal</code></li>
+        <li><span class="pill">RGB</span> <code>/assets</code>, <code>/assets/:asset_id</code>, <code>/assets/issue</code></li>
+        <li><span class="pill">Prism</span> <code>/prism/rules</code>, <code>/prism/rules/:id/invoice</code>, <code>/prism/rules/:id/splits</code></li>
+        <li><span class="pill">Webhooks</span> <code>/webhooks</code>, <code>/webhooks/:id</code></li>
+        <li><span class="pill">WS</span> <code>/ws</code></li>
+      </ul>
+    </div>
+
+    <div class="card alt">
+      <p><a href="/index.html">Back to Docs Index</a></p>
+    </div>
+  </div>
+</body>
+</html>
+
