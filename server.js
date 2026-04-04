@@ -3323,6 +3323,7 @@ async function executeSameNodeWalletTransfer({
       await upsertWalletAssetBalance(existingTransfer.wallet_asset_id, senderBalance);
       return {
         wallet: senderWallet,
+        sameNodeWalletTransfer: true,
         assetId,
         balance: senderBalance,
         payment: {
@@ -3561,6 +3562,7 @@ async function executeSameNodeWalletTransfer({
 
   return {
     wallet: senderWallet,
+    sameNodeWalletTransfer: true,
     assetId,
     balance: senderBalance,
     payment,
@@ -3593,6 +3595,25 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
   if (payeePubkey) {
     const nodeInfo = await rgbNodeRequestWithBase(apiBase, '/nodeinfo', {}, 'GET');
     senderPubkey = typeof nodeInfo?.pubkey === 'string' ? nodeInfo.pubkey : null;
+  }
+
+  // NODE-001: detect same-node wallet transfers via DB node assignment (accountRef) even when
+  // the decoded invoice doesn't include payee_pubkey.
+  const sameNodeByAccountRef =
+    Boolean(storedInvoice) &&
+    typeof storedInvoice?.rgb_account_ref === 'string' &&
+    storedInvoice.rgb_account_ref &&
+    storedInvoice.rgb_account_ref === accountRef;
+
+  if (sameNodeByAccountRef) {
+    return executeSameNodeWalletTransfer({
+      senderWallet: wallet,
+      senderAccountRef: accountRef,
+      receiverInvoice: storedInvoice,
+      decoded,
+      invoice,
+      eventSource,
+    });
   }
 
   // Same-node invoices are rejected by the RGB Lightning node (it can't "pay itself").
@@ -3717,6 +3738,7 @@ async function executeRgbLightningPayment({ req, invoice, eventSource = 'wallet_
     decoded,
     payment,
     paymentResult,
+    sameNodeWalletTransfer: false,
   };
 }
 
@@ -3736,7 +3758,8 @@ async function handleRgbPayLightning(req, res) {
   }
 
   try {
-    const { wallet, assetId, balance, payment, paymentResult, decoded } = await executeRgbLightningPayment({
+    const { wallet, assetId, balance, payment, paymentResult, decoded, sameNodeWalletTransfer } =
+      await executeRgbLightningPayment({
       req,
       invoice,
       eventSource: 'wallet_api',
@@ -3747,6 +3770,7 @@ async function handleRgbPayLightning(req, res) {
       walletKey: wallet.wallet_key,
       assetId,
       balance,
+      sameNodeWalletTransfer: Boolean(sameNodeWalletTransfer),
       payment: {
         payment_hash: payment.payment_hash || paymentResult?.payment_hash || null,
         status: payment.status || paymentResult?.status || 'Pending',
