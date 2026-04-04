@@ -6757,8 +6757,9 @@ async function handleBoardMergeUpsert(req, res) {
     return;
   }
 
-  if (!/^PHO-\d+[A-Z]?$/i.test(sourceTicketId) || !/^PHO-\d+[A-Z]?$/i.test(targetTicketId)) {
-    sendJson(res, 400, { ok: false, error: 'Ticket IDs must look like PHO-040.' });
+  const ticketIdPattern = /^[A-Z][A-Z0-9]{1,9}-\d{1,5}[A-Z]?$/i;
+  if (!ticketIdPattern.test(sourceTicketId) || !ticketIdPattern.test(targetTicketId)) {
+    sendJson(res, 400, { ok: false, error: 'Ticket IDs must look like INF-01 or PHO-040.' });
     return;
   }
 
