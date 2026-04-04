@@ -6541,6 +6541,12 @@ async function handleBoardTicketCreate(req, res) {
     return;
   }
 
+  const requestedTicketIdRaw =
+    typeof body.ticketId === 'string'
+      ? body.ticketId
+      : (typeof body.id === 'string' ? body.id : '');
+  const requestedTicketId = requestedTicketIdRaw.trim().toUpperCase();
+
   const title = typeof body.title === 'string' ? body.title.trim() : '';
   const status = typeof body.status === 'string' ? body.status.trim() : 'todo';
   const priority = typeof body.priority === 'string' ? body.priority.trim() : 'medium';
@@ -6575,14 +6581,23 @@ async function handleBoardTicketCreate(req, res) {
     return;
   }
 
-  const numericIds = await listBoardTickets();
-  const highestExisting = numericIds
-    .map((row) => {
-      const match = String(row.ticket_id || '').match(/^PHO-(\d+)$/);
-      return match ? Number(match[1]) : 0;
-    })
-    .reduce((max, value) => Math.max(max, value), 20);
-  const ticketId = `PHO-${String(highestExisting + 1).padStart(3, '0')}`;
+  let ticketId = null;
+  if (requestedTicketId) {
+    if (!/^[A-Z][A-Z0-9]{1,9}-\d{1,5}$/.test(requestedTicketId)) {
+      sendJson(res, 400, { ok: false, error: 'ticketId format is invalid. Expected like INF-01 or PHO-040.' });
+      return;
+    }
+    ticketId = requestedTicketId;
+  } else {
+    const numericIds = await listBoardTickets();
+    const highestExisting = numericIds
+      .map((row) => {
+        const match = String(row.ticket_id || '').match(/^PHO-(\d+)$/);
+        return match ? Number(match[1]) : 0;
+      })
+      .reduce((max, value) => Math.max(max, value), 20);
+    ticketId = `PHO-${String(highestExisting + 1).padStart(3, '0')}`;
+  }
 
   try {
     const row = await createBoardTicket({
