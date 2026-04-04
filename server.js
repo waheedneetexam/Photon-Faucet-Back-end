@@ -2004,9 +2004,9 @@ async function findStoredInvoiceByString(invoiceString) {
         i.recipient_id,
         i.status,
         i.metadata,
-        w.wallet_key,
-        w.rgb_account_ref,
-        wa.asset_id,
+        COALESCE(i.receiver_wallet_key, w.wallet_key) AS wallet_key,
+        COALESCE(i.receiver_rgb_account_ref, w.rgb_account_ref) AS rgb_account_ref,
+        COALESCE(i.asset_id, wa.asset_id) AS asset_id,
         wa.contract_id,
         wa.ticker,
         wa.name,
@@ -2544,6 +2544,22 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
     ? new Date(Number(invoice.expiration_timestamp) * 1000)
     : null;
 
+  const walletRow = await query(
+    `
+      SELECT wallet_key, rgb_account_ref
+      FROM wallets
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [walletId]
+  );
+  const receiverWalletKey = walletRow.rows[0]?.wallet_key || null;
+  const receiverAccountRef = walletRow.rows[0]?.rgb_account_ref || null;
+  const receiverAssetId = (typeof invoice?.asset_id === 'string' && invoice.asset_id.trim())
+    ? invoice.asset_id.trim()
+    : null;
+  const receiverAssetAmountRaw = invoice?.asset_amount ?? assignmentValue ?? null;
+
   await query(
     `
       INSERT INTO rgb_invoices (
@@ -2554,6 +2570,10 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
         recipient_type,
         assignment_type,
         assignment_value,
+        receiver_wallet_key,
+        receiver_rgb_account_ref,
+        asset_id,
+        asset_amount,
         amount_open,
         batch_transfer_idx,
         proxy_endpoint,
@@ -2561,7 +2581,7 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
         status,
         metadata
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'open', $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'open', $16)
       ON CONFLICT (invoice_string)
       DO UPDATE SET
         wallet_id = EXCLUDED.wallet_id,
@@ -2570,6 +2590,10 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
         recipient_type = EXCLUDED.recipient_type,
         assignment_type = EXCLUDED.assignment_type,
         assignment_value = EXCLUDED.assignment_value,
+        receiver_wallet_key = EXCLUDED.receiver_wallet_key,
+        receiver_rgb_account_ref = EXCLUDED.receiver_rgb_account_ref,
+        asset_id = EXCLUDED.asset_id,
+        asset_amount = EXCLUDED.asset_amount,
         amount_open = EXCLUDED.amount_open,
         batch_transfer_idx = EXCLUDED.batch_transfer_idx,
         proxy_endpoint = EXCLUDED.proxy_endpoint,
@@ -2584,6 +2608,10 @@ async function recordRgbInvoice({ walletId, walletAssetId, invoice, openAmount, 
       invoice.recipient_type || null,
       assignmentType,
       assignmentValue,
+      receiverWalletKey,
+      receiverAccountRef,
+      receiverAssetId,
+      receiverAssetAmountRaw,
       openAmount,
       invoice.batch_transfer_idx || null,
       proxyEndpoint || null,
