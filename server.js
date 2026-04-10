@@ -1905,7 +1905,7 @@ function normalizeTransferAmount(value) {
 }
 
 async function getWalletInvoiceOwnership(walletId, assetId) {
-  const [invoiceResult, outgoingSendResult, issuedByResult] = await Promise.all([
+  const [invoiceResult, outgoingSendResult, issuedByResult, utxoSlotResult] = await Promise.all([
     query(
       `
         SELECT
@@ -1945,6 +1945,13 @@ async function getWalletInvoiceOwnership(walletId, assetId) {
       `,
       [assetId]
     ),
+    // FIX-2b: Also fetch all UTXO slot outpoints owned by this wallet so that incoming
+    // Receive transfers can be attributed even when no rgb_invoices row exists yet
+    // (e.g. the wallet received to a UTXO slot whose invoice was never explicitly registered).
+    query(
+      `SELECT outpoint FROM user_utxo_slots WHERE wallet_id = $1`,
+      [walletId]
+    ),
   ]);
 
   const issuedByWalletKeyRaw = issuedByResult.rows?.[0]?.issued_by_wallet_key || '';
@@ -1963,6 +1970,10 @@ async function getWalletInvoiceOwnership(walletId, assetId) {
         .filter(Boolean)
     ),
     issuedByWalletKey,
+    // FIX-2b: Set of outpoints (txid:vout) belonging to this wallet's UTXO slots
+    ownedUtxoOutpoints: new Set(
+      utxoSlotResult.rows.map((row) => row.outpoint).filter(Boolean)
+    ),
   };
 }
 
@@ -2386,6 +2397,14 @@ function isTransferRelevantToWallet(transfer, wallet, ownership) {
     // without a recipient id. Attribute those to the issuing wallet so the per-wallet
     // ledger is populated correctly on shared nodes.
     if (!recipientId && ownership?.issuedByWalletKey && wallet.wallet_key === ownership.issuedByWalletKey) {
+      return true;
+    }
+    // FIX-2b: Also attribute incoming Receive transfers when the transfer's receive_utxo
+    // matches a UTXO slot that belongs to this wallet. This covers the case where Wallet B
+    // generated an RGB invoice but the recipient_id was never stored in rgb_invoices
+    // (e.g. due to a timing issue or missing invoice registration step).
+    const receiveUtxo = transfer.receive_utxo || null;
+    if (receiveUtxo && ownership.ownedUtxoOutpoints && ownership.ownedUtxoOutpoints.has(receiveUtxo)) {
       return true;
     }
     return (
@@ -2923,27 +2942,23 @@ async function handleRgbBalance(req, res) {
     }
 
     const synced = await syncWalletAssetFromRgbNode({ walletId: wallet.id, assetId });
+    // FIX-2a: Trigger a node-level refresh before syncing transfers so the receiver's node
+    // picks up any inbound consignments that have not yet been processed locally.
+    const { apiBase: balanceApiBase } = resolveWalletNodeContext(wallet);
+    try {
+      await rgbNodeRequestWithBase(balanceApiBase, '/refreshtransfers', { skip_sync: false });
+    } catch (refreshErr) {
+      console.warn(`[${nowIso()}] [RGB API] Pre-balance refresh failed (non-fatal):`, refreshErr.message);
+    }
     const transfers = await syncWalletTransferRows(wallet, assetId, synced.walletAsset.id);
     await syncWalletLightningPayments(wallet, assetId, synced.walletAsset.id);
     await reconcileWalletConsignmentSecrets(wallet, synced.walletAsset.id, transfers);
     const derivedBalance = await deriveWalletScopedBalance(synced.walletAsset.id);
-    // Wallet-scoped ledger balance (DB transfers + internal same-node transfers) is the source of truth
-    // for shared-node wallets, but new wallets may not have their historical transfers imported yet.
-    // If the ledger is empty, fall back to the live node-reported balance so the UI doesn't show 0.
-    const transferCountResult = await query(
-      `SELECT COUNT(*)::int AS count FROM rgb_transfers WHERE wallet_asset_id = $1`,
-      [synced.walletAsset.id]
-    );
-    const transferCount = Number(transferCountResult.rows?.[0]?.count || 0);
-    const balance =
-      transferCount === 0 && synced.asset?.balance
-        ? {
-          ...normalizeLiveRgbBalance(synced.asset.balance),
-          locked_missing_secret: '0',
-          locked_unconfirmed: '0',
-          spendability_status: 'spendable',
-        }
-        : derivedBalance;
+    // FIX-1: The old fallback used the node-level live balance when a wallet had no transfer history,
+    // which leaked the issuer's (or shared-node total) balance to every wallet on the same node.
+    // The correct behaviour for a wallet with no transfer history is to show zero — the wallet
+    // genuinely does not own any of this asset yet.
+    const balance = derivedBalance;
     await upsertWalletAssetBalance(synced.walletAsset.id, balance);
     sendJson(res, 200, {
       ok: true,
